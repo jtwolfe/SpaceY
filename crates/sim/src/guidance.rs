@@ -391,8 +391,8 @@ pub fn corridor_radius_for(alt: f64, scenario: Scenario) -> f64 {
         Scenario::Rtls => 350.0 + 18_000.0 * saturate(alt / 80_000.0),
         Scenario::LeoDeorbit => {
             if alt > 100_000.0 {
-                // Coast is a half-rev of Earth; don't trip on the ballistic arc.
-                400_000.0
+                // Pad-ENU crossrange is meaningless on a half-rev coast.
+                f64::INFINITY
             } else {
                 1_200.0 + 55_000.0 * saturate(alt / 100_000.0)
             }

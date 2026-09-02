@@ -95,6 +95,11 @@ pub fn enu_to_ecef_vec(v: Vec3, lat: f64, lon: f64) -> Vec3 {
     e * v.x + n * v.y + u * v.z
 }
 
+/// Great-circle distance between two ECEF (or ECI-at-t0) position vectors.
+pub fn great_circle_m(a: Vec3, b: Vec3) -> f64 {
+    EARTH_RADIUS_EQ * crate::math::angle_between(a, b)
+}
+
 /// Keplerian periapsis radius from an ECI (or inertial) state.
 /// Hyperbolic / near-parabolic trajectories return `f64::INFINITY`.
 pub fn periapsis_radius(r: Vec3, v: Vec3) -> f64 {

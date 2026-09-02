@@ -79,7 +79,7 @@ async function main() {
     row(guid, [
       ["Phase", s.phase],
       ["Scenario", s.scenario === "leo" ? "LEO deorbit" : "RTLS"],
-      ["Range", `${fmt(s.range_h / 1000, 2)} km`],
+      ["Range", `${fmt((s.scenario === "leo" ? s.range_gc : s.range_h) / 1000, 2)} km`],
       ["Periapsis", Number.isFinite(periKm) ? `${fmt(periKm, 0)} km` : "escape"],
       ["Weather", [s.weather_storm ? "storm" : null, s.weather_shear ? "shear" : null].filter(Boolean).join("+") || "fair"],
       ["Term", s.term || "—", s.success ? "good" : s.terminated ? "bad" : undefined],

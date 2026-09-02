@@ -3,7 +3,8 @@
 use crate::atmosphere;
 use crate::constants::*;
 use crate::earth::{
-    ecef_to_geodetic, eci_to_ecef, eci_vel_to_ecef_ground, gravity_j2, pad_ecef, periapsis_radius,
+    ecef_to_geodetic, eci_to_ecef, eci_vel_to_ecef_ground, gravity_j2, great_circle_m, pad_ecef,
+    periapsis_radius,
 };
 use crate::guidance::{
     apply_residual, attitude_command, classify_phase, corridor_offset, corridor_radius_for,
@@ -391,6 +392,7 @@ impl Sim {
             terminated: self.terminated(),
             success: self.term == TermReason::Success,
             range_h: self.last_nav.range_h,
+            range_gc: great_circle_m(r_ecef, pad),
             pos_enu: self.last_nav.pos_enu.to_array(),
             accel_g: self.last_accel_g,
             wind_gust: self.wind.gust_speed(),
@@ -444,6 +446,7 @@ pub struct Snapshot {
     pub terminated: bool,
     pub success: bool,
     pub range_h: f64,
+    pub range_gc: f64,
     pub pos_enu: [f64; 3],
     pub accel_g: f64,
     pub wind_gust: f64,
@@ -523,6 +526,7 @@ pub fn run_episode_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::guidance::TermReason;
     use crate::scenario::Scenario;
     use crate::wind::Weather;
 
@@ -579,6 +583,17 @@ mod tests {
             sim.phase
         );
         assert!(sim.v_eci.norm() > 7_400.0);
+    }
+
+    #[test]
+    fn leo_coast_does_not_corridor_trip() {
+        let mut sim = Sim::new_with(3, true, 0.0, Scenario::LeoDeorbit, Weather::default());
+        sim.step_for(180.0);
+        assert_ne!(sim.term, TermReason::Corridor);
+        assert!(sim.last_nav.alt > 140_000.0);
+        assert!(sim.v_eci.norm() > 7_400.0);
+        let gc = sim.snapshot().range_gc;
+        assert!(gc > 10_000_000.0, "still far downrange {gc}");
     }
 
     #[test]

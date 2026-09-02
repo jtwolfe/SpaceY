@@ -33,6 +33,7 @@ export type Snapshot = {
   terminated: boolean;
   success: boolean;
   range_h: number;
+  range_gc: number;
   pos_enu: [number, number, number];
   accel_g: number;
   wind_gust: number;

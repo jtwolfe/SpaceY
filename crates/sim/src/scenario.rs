@@ -224,4 +224,17 @@ mod tests {
         assert!(geo.alt > 70_000.0 && geo.alt < 90_000.0);
         assert!(v_g.norm() > 1_800.0 && v_g.norm() < 2_400.0);
     }
+
+    #[test]
+    fn leo_start_is_half_rev_from_pad() {
+        let mut rng = SmallRng::seed_from_u64(7);
+        let s = Scenario::LeoDeorbit.spawn(&mut rng);
+        let pad = crate::earth::pad_ecef();
+        let ang = crate::math::angle_between(s.r_eci, pad);
+        let gc = EARTH_RADIUS_EQ * ang;
+        assert!(
+            gc > 12_000_000.0,
+            "great-circle to pad should be half-rev, got {gc} m"
+        );
+    }
 }
