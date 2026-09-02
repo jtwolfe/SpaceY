@@ -1,0 +1,13 @@
+{
+  "name": "spacey",
+  "private": true,
+  "description": "Falcon 9-class first-stage landing sim + in-browser CMA-ES trainer",
+  "scripts": {
+    "setup": "rustup target add wasm32-unknown-unknown && npm --prefix web install",
+    "build:wasm": "cargo build -p spacey_sim --target wasm32-unknown-unknown --release && wasm-bindgen --target web --out-dir web/src/pkg --out-name spacey target/wasm32-unknown-unknown/release/spacey_sim.wasm",
+    "dev": "npm run build:wasm && npm --prefix web run dev",
+    "start": "npm run dev",
+    "build": "npm run build:wasm && npm --prefix web run build",
+    "test": "cargo test -p spacey_sim"
+  }
+}
