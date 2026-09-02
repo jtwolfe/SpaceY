@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SpaceY — first-stage recovery</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect fill='%2305070c' width='64' height='64'/%3E%3Ctext x='8' y='42' fill='%237ee0ff' font-size='22' font-family='monospace'%3ESY%3C/text%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="view"></canvas>
+
+      <header class="topbar">
+        <div class="brand">
+          <span class="mark">SY</span>
+          <div>
+            <div class="title">SPACEY</div>
+            <div class="sub">FALCON 9-CLASS · STAGE 1 · RTLS TRAINER</div>
+          </div>
+        </div>
+        <div class="status" id="mission-status">STANDBY</div>
+      </header>
+
+      <aside class="hud left">
+        <h2>VEHICLE</h2>
+        <dl id="veh-hud"></dl>
+        <h2>AERO</h2>
+        <dl id="aero-hud"></dl>
+      </aside>
+
+      <aside class="hud right">
+        <h2>TRAINING</h2>
+        <div class="train-meta" id="train-meta">generation 0 · idle</div>
+        <div class="bars" id="fit-bars"></div>
+        <h2>GUIDANCE</h2>
+        <dl id="guid-hud"></dl>
+      </aside>
+
+      <footer class="dock">
+        <div class="cluster">
+          <button id="btn-train" class="primary">Start training</button>
+          <button id="btn-pause">Pause</button>
+          <button id="btn-reset">Reset episode</button>
+        </div>
+        <div class="cluster">
+          <label class="check">
+            <input type="checkbox" id="tog-destroy" checked />
+            Destruction
+          </label>
+          <label class="slider">
+            Wind
+            <input type="range" id="rng-wind" min="0" max="2" step="0.1" value="1" />
+            <span id="wind-val">1.0×</span>
+          </label>
+        </div>
+        <div class="cluster">
+          <span class="lbl">Camera</span>
+          <button data-cam="chase" class="cam on">Chase</button>
+          <button data-cam="pad" class="cam">Pad</button>
+          <button data-cam="orbit" class="cam">Orbital</button>
+        </div>
+        <div class="cluster">
+          <span class="lbl">Warp</span>
+          <button data-warp="1" class="warp on">1×</button>
+          <button data-warp="5" class="warp">5×</button>
+          <button data-warp="25" class="warp">25×</button>
+          <button data-warp="100" class="warp">100×</button>
+        </div>
+      </footer>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
