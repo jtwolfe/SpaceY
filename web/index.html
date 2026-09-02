@@ -16,7 +16,7 @@
           <span class="mark">SY</span>
           <div>
             <div class="title">SPACEY</div>
-            <div class="sub">FALCON 9-CLASS · STAGE 1 · RTLS TRAINER</div>
+            <div class="sub" id="mission-sub">FALCON 9-CLASS · STAGE 1 · RTLS TRAINER</div>
           </div>
         </div>
         <div class="status" id="mission-status">STANDBY</div>
@@ -44,9 +44,22 @@
           <button id="btn-reset">Reset episode</button>
         </div>
         <div class="cluster">
+          <span class="lbl">Scenario</span>
+          <button data-scenario="0" class="scen on">RTLS</button>
+          <button data-scenario="1" class="scen">LEO</button>
+        </div>
+        <div class="cluster">
           <label class="check">
             <input type="checkbox" id="tog-destroy" checked />
             Destruction
+          </label>
+          <label class="check">
+            <input type="checkbox" id="tog-storm" />
+            Storm
+          </label>
+          <label class="check">
+            <input type="checkbox" id="tog-shear" />
+            Shear
           </label>
           <label class="slider">
             Wind
@@ -66,6 +79,7 @@
           <button data-warp="5" class="warp">5×</button>
           <button data-warp="25" class="warp">25×</button>
           <button data-warp="100" class="warp">100×</button>
+          <button data-warp="250" class="warp">250×</button>
         </div>
       </footer>
     </div>

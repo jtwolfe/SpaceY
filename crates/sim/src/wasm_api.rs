@@ -2,7 +2,9 @@
 
 use crate::cmaes::Trainer;
 use crate::guidance::N_WEIGHTS;
+use crate::scenario::Scenario;
 use crate::sim::Sim;
+use crate::wind::Weather;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -12,6 +14,8 @@ pub struct Engine {
     time_warp: f64,
     destroy: bool,
     wind_scale: f64,
+    scenario: Scenario,
+    weather: Weather,
     seed: u32,
     watch_best: bool,
 }
@@ -23,24 +27,32 @@ impl Engine {
         let seed = 7;
         let destroy = true;
         let wind_scale = 1.0;
+        let scenario = Scenario::Rtls;
+        let weather = Weather::default();
         Engine {
-            display: Sim::new(seed, destroy, wind_scale),
+            display: Sim::new_with(seed, destroy, wind_scale, scenario, weather),
             trainer: Trainer::new(seed.wrapping_add(99), destroy, wind_scale),
             time_warp: 1.0,
             destroy,
             wind_scale,
+            scenario,
+            weather,
             seed,
             watch_best: true,
         }
     }
 
-    pub fn reset(&mut self, seed: u32) {
-        self.seed = seed;
-        let mut sim = Sim::new(seed, self.destroy, self.wind_scale);
+    fn rebuild_display(&mut self, seed: u32) {
+        let mut sim = Sim::new_with(seed, self.destroy, self.wind_scale, self.scenario, self.weather);
         if self.watch_best {
             sim.set_weights(self.trainer.best_weights());
         }
         self.display = sim;
+    }
+
+    pub fn reset(&mut self, seed: u32) {
+        self.seed = seed;
+        self.rebuild_display(seed);
     }
 
     pub fn set_destruction(&mut self, enabled: bool) {
@@ -57,8 +69,44 @@ impl Engine {
         self.trainer.wind_scale = s;
     }
 
+    pub fn set_scenario(&mut self, id: u32) {
+        let next = Scenario::from_id(id);
+        if next == self.scenario {
+            return;
+        }
+        self.scenario = next;
+        self.trainer.scenario = next;
+        self.rebuild_display(self.seed);
+    }
+
+    pub fn scenario(&self) -> u32 {
+        self.scenario.id()
+    }
+
+    pub fn set_storm(&mut self, enabled: bool) {
+        self.weather.storm = enabled;
+        self.display.weather.storm = enabled;
+        self.display.wind.weather.storm = enabled;
+        self.trainer.weather.storm = enabled;
+    }
+
+    pub fn set_shear(&mut self, enabled: bool) {
+        self.weather.shear = enabled;
+        self.display.weather.shear = enabled;
+        self.display.wind.weather.shear = enabled;
+        self.trainer.weather.shear = enabled;
+    }
+
+    pub fn storm(&self) -> bool {
+        self.weather.storm
+    }
+
+    pub fn shear(&self) -> bool {
+        self.weather.shear
+    }
+
     pub fn set_time_warp(&mut self, warp: f64) {
-        self.time_warp = warp.clamp(0.25, 200.0);
+        self.time_warp = warp.clamp(0.25, 400.0);
     }
 
     pub fn time_warp(&self) -> f64 {
@@ -93,7 +141,9 @@ impl Engine {
         if self.display.terminated() {
             return;
         }
-        let mut remain = (dt * self.time_warp).clamp(0.0, 4.0);
+        // Orbital coast at 250× needs more than 4 s of sim per frame.
+        let cap = if self.scenario.is_orbital() { 12.0 } else { 4.0 };
+        let mut remain = (dt * self.time_warp).clamp(0.0, cap);
         while remain > 1e-4 && !self.display.terminated() {
             let h = self.display.adaptive_dt().min(remain);
             self.display.step(h);

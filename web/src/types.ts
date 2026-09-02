@@ -12,6 +12,7 @@ export type Snapshot = {
   quat: [number, number, number, number];
   quat_ecef: [number, number, number, number];
   speed: number;
+  speed_inertial: number;
   mach: number;
   q_dyn: number;
   aoa_deg: number;
@@ -35,6 +36,12 @@ export type Snapshot = {
   pos_enu: [number, number, number];
   accel_g: number;
   wind_gust: number;
+  density: number;
+  density_scale: number;
+  periapsis_alt: number;
+  scenario: string;
+  weather_storm: boolean;
+  weather_shear: boolean;
   destroy_enabled: boolean;
   wind_scale: number;
   cd: number;

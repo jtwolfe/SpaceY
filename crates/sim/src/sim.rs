@@ -3,20 +3,20 @@
 use crate::atmosphere;
 use crate::constants::*;
 use crate::earth::{
-    ecef_to_geodetic, eci_to_ecef, eci_vel_to_ecef_ground, enu_basis, geodetic_to_ecef, gravity_j2,
-    pad_ecef, pad_geodetic, Geodetic,
+    ecef_to_geodetic, eci_to_ecef, eci_vel_to_ecef_ground, gravity_j2, pad_ecef, periapsis_radius,
 };
 use crate::guidance::{
-    apply_residual, attitude_command, classify_phase, corridor_offset, corridor_radius,
+    apply_residual, attitude_command, classify_phase, corridor_offset, corridor_radius_for,
     evaluate_contact, features, fuel_infeasible, ground_hit, impact_destroy, nav_from,
     nominal_controls, policy_residual, success, Nav, Phase, TermReason, N_WEIGHTS,
 };
 use crate::math::{Quat, Vec3};
 use crate::constants::inertia_diag;
+use crate::scenario::Scenario;
 use crate::vehicle::{aero, check_destruction, propulsion, DestroyReason};
-use crate::wind::Wind;
+use crate::wind::{Weather, Wind};
 use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
+use rand::SeedableRng;
 use serde::Serialize;
 
 fn predicted_overshoot_proxy(nav: &Nav) -> f64 {
@@ -36,6 +36,8 @@ pub struct Sim {
     pub wind: Wind,
     pub destroy_enabled: bool,
     pub wind_scale: f64,
+    pub scenario: Scenario,
+    pub weather: Weather,
     pub weights: Vec<f64>,
     pub start_ecef: Vec3,
     pub landing_latched: bool,
@@ -55,73 +57,62 @@ pub struct Sim {
     pub last_fins: [f64; 3],
     pub last_gimbal: [f64; 2],
     pub last_accel_g: f64,
+    pub last_density: f64,
+    pub last_periapsis_alt: f64,
     pub seed: u32,
 }
 
 impl Sim {
     pub fn new(seed: u32, destroy_enabled: bool, wind_scale: f64) -> Self {
-        let mut rng = SmallRng::seed_from_u64(seed as u64 + 17);
-        // Start ~80 km up, ~95 km east of LZ-1, heading west, hypersonic, shallow.
-        let pad = pad_geodetic();
-        // ~62 km east of LZ-1, slightly steeper than a skip entry so the
-        // booster arrives near the pad as the entry burn ends.
-        let dlon = 62_000.0 / (EARTH_RADIUS_EQ * pad.lat.cos());
-        let jitter = 0.0008 * (rng.gen::<f64>() - 0.5);
-        let geo = Geodetic {
-            lat: pad.lat + 0.0004 * (rng.gen::<f64>() - 0.5),
-            lon: pad.lon + dlon + jitter,
-            alt: 80_000.0 + 1_500.0 * (rng.gen::<f64>() - 0.5),
-        };
-        let r_ecef = geodetic_to_ecef(geo);
-        let (east, north, up) = enu_basis(geo.lat, geo.lon);
-        let speed = 2_050.0 + 60.0 * (rng.gen::<f64>() - 0.5);
-        let gamma = (-7.5 + rng.gen::<f64>() * 0.8) * std::f64::consts::PI / 180.0;
-        let heading = (269.2 + rng.gen::<f64>() * 1.2) * std::f64::consts::PI / 180.0;
-        let vh = speed * gamma.cos();
-        let vu = speed * gamma.sin();
-        let v_enu = Vec3::new(vh * heading.sin(), vh * heading.cos(), vu);
-        let v_ground_ecef = east * v_enu.x + north * v_enu.y + up * v_enu.z;
-        // t=0: ECI=ECEF. Inertial vel = ground + ω × r.
-        let omega_e = Vec3::new(0.0, 0.0, EARTH_OMEGA);
-        let v_eci = v_ground_ecef + omega_e.cross(r_ecef);
-        let r_eci = r_ecef;
-
-        // Tail-first: +X opposite velocity.
-        let desired_x = if v_ground_ecef.norm() > 1.0 {
-            -v_ground_ecef.normalized()
-        } else {
-            up
-        };
-        let q = Quat::from_rotation_arc(Vec3::X, desired_x);
-
-        let mut s = Self {
-            t: 0.0,
-            r_eci,
-            v_eci,
-            q_body_to_eci: q,
-            omega_body: Vec3::ZERO,
-            fuel: START_FUEL_KG,
-            wind: Wind::new(seed as u64 + 99, wind_scale),
+        Self::new_with(
+            seed,
             destroy_enabled,
             wind_scale,
+            Scenario::Rtls,
+            Weather::default(),
+        )
+    }
+
+    pub fn new_with(
+        seed: u32,
+        destroy_enabled: bool,
+        wind_scale: f64,
+        scenario: Scenario,
+        weather: Weather,
+    ) -> Self {
+        let mut rng = SmallRng::seed_from_u64(seed as u64 + 17);
+        let spawn = scenario.spawn(&mut rng);
+        let fuel = spawn.fuel;
+        let mut s = Self {
+            t: 0.0,
+            r_eci: spawn.r_eci,
+            v_eci: spawn.v_eci,
+            q_body_to_eci: spawn.q_body_to_eci,
+            omega_body: Vec3::ZERO,
+            fuel,
+            wind: Wind::new_weather(seed as u64 + 99, wind_scale, weather),
+            destroy_enabled,
+            wind_scale,
+            scenario,
+            weather,
             weights: vec![0.0; N_WEIGHTS],
-            start_ecef: r_ecef,
+            start_ecef: spawn.start_ecef,
             landing_latched: false,
             intact: true,
             destroy_reason: DestroyReason::None,
             term: TermReason::None,
             phase: Phase::Exo,
             last_nav: nav_from(
-                r_ecef,
-                v_ground_ecef,
-                desired_x,
-                geo.alt,
-                geo.alt,
+                spawn.start_ecef,
+                Vec3::ZERO,
+                Vec3::X,
                 0.0,
                 0.0,
                 0.0,
-                START_FUEL_KG,
-                wet_mass(START_FUEL_KG),
+                0.0,
+                0.0,
+                fuel,
+                wet_mass(fuel),
             ),
             last_aero_q: 0.0,
             last_mach: 0.0,
@@ -134,9 +125,12 @@ impl Sim {
             last_fins: [0.0; 3],
             last_gimbal: [0.0; 2],
             last_accel_g: 0.0,
+            last_density: 0.0,
+            last_periapsis_alt: 0.0,
             seed,
         };
         s.refresh_nav();
+        s.phase = classify_phase(&s.last_nav, s.landing_latched);
         s
     }
 
@@ -159,6 +153,8 @@ impl Sim {
             } else {
                 0.02
             }
+        } else if self.last_nav.alt > 150_000.0 && self.last_aero_q < 50.0 {
+            0.80
         } else if self.last_nav.alt > 65_000.0 && self.last_aero_q < 200.0 {
             0.20
         } else if self.last_nav.alt > 25_000.0 && self.last_aero_q < 8_000.0 {
@@ -179,7 +175,14 @@ impl Sim {
         let body_x_ecef = q_e.rotate(body_x);
         let engine_ecef = r_ecef + q_e.rotate(self.q_body_to_eci.rotate(Vec3::new(-STAGE_LENGTH_M * 0.5, 0.0, 0.0)));
         let engine_alt = ecef_to_geodetic(engine_ecef).alt;
-        self.last_nav = nav_from(
+        let peri_r = periapsis_radius(self.r_eci, self.v_eci);
+        let peri_alt = if peri_r.is_finite() {
+            peri_r - EARTH_RADIUS_EQ
+        } else {
+            f64::INFINITY
+        };
+        self.last_periapsis_alt = peri_alt;
+        let mut nav = nav_from(
             r_ecef,
             v_g,
             body_x_ecef,
@@ -191,6 +194,8 @@ impl Sim {
             self.fuel,
             wet_mass(self.fuel),
         );
+        nav.periapsis_alt = peri_alt;
+        self.last_nav = nav;
     }
 
     pub fn step(&mut self, dt: f64) {
@@ -203,7 +208,8 @@ impl Sim {
 
         let (r_ecef, v_ground) = eci_vel_to_ecef_ground(self.r_eci, self.v_eci, self.t);
         let geo = ecef_to_geodetic(r_ecef);
-        let air = atmosphere::lookup(geo.alt);
+        let air = atmosphere::lookup_scaled(geo.alt, self.weather.density_scale());
+        self.last_density = air.density;
         let q_e = crate::earth::q_eci_to_ecef(self.t);
         let v_wind = self.wind.velocity_ecef(geo.alt, geo.lat, geo.lon);
         let v_air_ecef = v_ground - v_wind;
@@ -319,7 +325,7 @@ impl Sim {
         }
 
         let off = corridor_offset(eci_to_ecef(self.r_eci, self.t), self.start_ecef, pad_ecef());
-        if off > corridor_radius(self.last_nav.alt) {
+        if off > corridor_radius_for(self.last_nav.alt, self.scenario) {
             self.term = TermReason::Corridor;
             return;
         }
@@ -327,7 +333,7 @@ impl Sim {
             self.term = TermReason::FuelInfeasible;
             return;
         }
-        if self.t > 420.0 {
+        if self.t > self.scenario.timeout() {
             self.term = TermReason::Timeout;
         }
     }
@@ -364,11 +370,12 @@ impl Sim {
                 [qe.w, qe.x, qe.y, qe.z]
             },
             speed: self.last_nav.speed,
+            speed_inertial: self.v_eci.norm(),
             mach: self.last_mach,
             q_dyn: self.last_aero_q,
             aoa_deg: self.last_aoa * 180.0 / std::f64::consts::PI,
             fuel: self.fuel,
-            fuel_frac: self.fuel / START_FUEL_KG,
+            fuel_frac: self.fuel / self.scenario.start_fuel(),
             mass: wet_mass(self.fuel),
             throttle: self.last_throttle,
             thrust: self.last_thrust,
@@ -387,6 +394,12 @@ impl Sim {
             pos_enu: self.last_nav.pos_enu.to_array(),
             accel_g: self.last_accel_g,
             wind_gust: self.wind.gust_speed(),
+            density: self.last_density,
+            density_scale: self.weather.density_scale(),
+            periapsis_alt: self.last_periapsis_alt,
+            scenario: self.scenario.as_str(),
+            weather_storm: self.weather.storm,
+            weather_shear: self.weather.shear,
             destroy_enabled: self.destroy_enabled,
             wind_scale: self.wind_scale,
             cd: self.last_cd,
@@ -410,6 +423,7 @@ pub struct Snapshot {
     pub quat: [f64; 4],
     pub quat_ecef: [f64; 4],
     pub speed: f64,
+    pub speed_inertial: f64,
     pub mach: f64,
     pub q_dyn: f64,
     pub aoa_deg: f64,
@@ -433,6 +447,12 @@ pub struct Snapshot {
     pub pos_enu: [f64; 3],
     pub accel_g: f64,
     pub wind_gust: f64,
+    pub density: f64,
+    pub density_scale: f64,
+    pub periapsis_alt: f64,
+    pub scenario: &'static str,
+    pub weather_storm: bool,
+    pub weather_shear: bool,
     pub destroy_enabled: bool,
     pub wind_scale: f64,
     pub cd: f64,
@@ -467,10 +487,29 @@ pub fn episode_fitness(sim: &Sim) -> f64 {
 }
 
 pub fn run_episode(weights: &[f64], seed: u32, destroy: bool, wind_scale: f64) -> (f64, TermReason, Nav) {
-    let mut sim = Sim::new(seed, destroy, wind_scale);
+    run_episode_with(
+        weights,
+        seed,
+        destroy,
+        wind_scale,
+        Scenario::Rtls,
+        Weather::default(),
+    )
+}
+
+pub fn run_episode_with(
+    weights: &[f64],
+    seed: u32,
+    destroy: bool,
+    wind_scale: f64,
+    scenario: Scenario,
+    weather: Weather,
+) -> (f64, TermReason, Nav) {
+    let mut sim = Sim::new_with(seed, destroy, wind_scale, scenario, weather);
     sim.set_weights(weights);
     let mut guard = 0;
-    while !sim.terminated() && guard < 40_000 {
+    let cap = if scenario.is_orbital() { 80_000 } else { 40_000 };
+    while !sim.terminated() && guard < cap {
         let dt = sim.adaptive_dt();
         sim.step(dt);
         guard += 1;
@@ -484,6 +523,8 @@ pub fn run_episode(weights: &[f64], seed: u32, destroy: bool, wind_scale: f64) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scenario::Scenario;
+    use crate::wind::Weather;
 
     #[test]
     fn episode_terminates() {
@@ -504,5 +545,47 @@ mod tests {
         sim.step(0.2);
         assert!(sim.last_nav.alt > 70_000.0);
         assert!(sim.last_nav.speed > 1_500.0);
+    }
+
+    #[test]
+    fn leo_start_is_orbital_speed_in_near_vacuum() {
+        let sim = Sim::new_with(3, true, 1.0, Scenario::LeoDeorbit, Weather::default());
+        let snap = sim.snapshot();
+        assert!(snap.alt > 200_000.0, "alt {}", snap.alt);
+        assert!(
+            snap.speed_inertial > 7_600.0 && snap.speed_inertial < 8_000.0,
+            "inertial {}",
+            snap.speed_inertial
+        );
+        assert!(snap.density < 1e-9, "density {}", snap.density);
+        assert_eq!(snap.scenario, "leo");
+        assert_eq!(sim.phase, Phase::Deorbit);
+        assert!(sim.last_nav.periapsis_alt > 180_000.0);
+    }
+
+    #[test]
+    fn leo_deorbit_burn_lowers_periapsis() {
+        let mut sim = Sim::new_with(3, true, 0.0, Scenario::LeoDeorbit, Weather::default());
+        let peri0 = sim.last_nav.periapsis_alt;
+        sim.step_for(25.0);
+        assert!(sim.intact);
+        assert!(sim.last_nav.alt > 150_000.0);
+        assert!(
+            sim.last_nav.periapsis_alt < peri0 - 20_000.0
+                || sim.phase == Phase::Exo,
+            "peri {} → {} phase {:?}",
+            peri0,
+            sim.last_nav.periapsis_alt,
+            sim.phase
+        );
+        assert!(sim.v_eci.norm() > 7_400.0);
+    }
+
+    #[test]
+    fn default_scenario_is_rtls() {
+        let sim = Sim::new(1, true, 1.0);
+        assert_eq!(sim.scenario, Scenario::Rtls);
+        assert!(sim.last_nav.alt < 90_000.0);
+        assert!(sim.last_nav.speed < 2_500.0);
     }
 }
