@@ -1,4 +1,8 @@
 //! Small f64 linear-algebra helpers. Positions are Earth-radius scale; f64 is required.
+//!
+//! Transcendentals go through the `libm` crate on **every** target so the
+//! LEO skip is bit-identical between `cargo test` and the wasm32 browser
+//! build. Host libm (glibc) vs wasm compiler-rt is a ~600 m skip bias.
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Vec3 {
@@ -38,7 +42,7 @@ impl Vec3 {
     }
 
     pub fn norm(self) -> f64 {
-        self.norm_squared().sqrt()
+        sqrt(self.norm_squared())
     }
 
     pub fn normalized(self) -> Self {
@@ -139,9 +143,9 @@ impl Quat {
     pub fn from_axis_angle(axis: Vec3, angle: f64) -> Self {
         let a = axis.normalized();
         let h = angle * 0.5;
-        let s = h.sin();
+        let s = sin(h);
         Self {
-            w: h.cos(),
+            w: cos(h),
             x: a.x * s,
             y: a.y * s,
             z: a.z * s,
@@ -171,7 +175,7 @@ impl Quat {
     }
 
     pub fn normalized(self) -> Self {
-        let n = (self.w * self.w + self.x * self.x + self.y * self.y + self.z * self.z).sqrt();
+        let n = sqrt(self.w * self.w + self.x * self.x + self.y * self.y + self.z * self.z);
         if n < 1e-18 {
             Self::IDENTITY
         } else {
@@ -222,9 +226,12 @@ impl Quat {
     pub fn yaw_pitch_roll(self) -> (f64, f64, f64) {
         let x = self.rotate(Vec3::X);
         let y = self.rotate(Vec3::Y);
-        let yaw = y.x.atan2(x.x);
-        let pitch = -x.z.atan2((x.x * x.x + x.y * x.y).sqrt());
-        let roll = self.rotate(Vec3::Z).y.atan2(self.rotate(Vec3::Z).z);
+        let yaw = atan2(y.x, x.x);
+        let pitch = -atan2(x.z, sqrt(x.x * x.x + x.y * x.y));
+        let roll = {
+            let z = self.rotate(Vec3::Z);
+            atan2(z.y, z.z)
+        };
         (yaw, pitch, roll)
     }
 }
@@ -251,5 +258,67 @@ pub fn wrap_pi(a: f64) -> f64 {
 
 pub fn angle_between(a: Vec3, b: Vec3) -> f64 {
     let d = clamp(a.normalized().dot(b.normalized()), -1.0, 1.0);
-    d.acos()
+    acos(d)
+}
+
+/// Portable libm wrappers. Used by Earth frames, atmosphere, aero, and
+/// guidance so native and wasm32 integrate the same trajectory.
+#[inline]
+pub fn sin(x: f64) -> f64 {
+    libm::sin(x)
+}
+#[inline]
+pub fn cos(x: f64) -> f64 {
+    libm::cos(x)
+}
+#[inline]
+pub fn tan(x: f64) -> f64 {
+    libm::tan(x)
+}
+#[inline]
+pub fn asin(x: f64) -> f64 {
+    libm::asin(x)
+}
+#[inline]
+pub fn acos(x: f64) -> f64 {
+    libm::acos(x)
+}
+#[inline]
+pub fn atan(x: f64) -> f64 {
+    libm::atan(x)
+}
+#[inline]
+pub fn atan2(y: f64, x: f64) -> f64 {
+    libm::atan2(y, x)
+}
+#[inline]
+pub fn exp(x: f64) -> f64 {
+    libm::exp(x)
+}
+#[inline]
+pub fn ln(x: f64) -> f64 {
+    libm::log(x)
+}
+#[inline]
+pub fn powf(x: f64, y: f64) -> f64 {
+    libm::pow(x, y)
+}
+#[inline]
+pub fn sqrt(x: f64) -> f64 {
+    libm::sqrt(x)
+}
+#[inline]
+pub fn tanh(x: f64) -> f64 {
+    libm::tanh(x)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn portable_trig_is_finite() {
+        let x = super::sin(0.2) * super::cos(-0.2);
+        assert!(x.is_finite());
+        assert!((super::sqrt(4.0) - 2.0).abs() < 1e-15);
+        assert!((super::exp(0.0) - 1.0).abs() < 1e-15);
+    }
 }

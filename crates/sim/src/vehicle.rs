@@ -2,7 +2,7 @@
 
 use crate::atmosphere::Air;
 use crate::constants::*;
-use crate::math::{angle_between, clamp, Vec3};
+use crate::math::{angle_between, clamp, cos, sin, sqrt, Vec3};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Aero {
@@ -59,8 +59,9 @@ pub fn aero(
     let tail = Vec3::new(-1.0, 0.0, 0.0);
     let aoa = angle_between(tail, vhat);
 
-    let cd = cd0(mach) + 1.8 * aoa.sin().powi(2);
-    let cl = 0.55 * (2.0 * aoa).sin();
+    let s_aoa = sin(aoa);
+    let cd = cd0(mach) + 1.8 * s_aoa * s_aoa;
+    let cl = 0.55 * sin(2.0 * aoa);
 
     // Drag opposite air-relative velocity; lift in the plane of tail × (tail × v).
     let f_drag = vhat * (-q * REF_AREA_M2 * cd);
@@ -95,7 +96,7 @@ pub fn aero(
     let f_fins = Vec3::new(0.0, -q * s * cl_d * fy * 0.4, q * s * cl_d * fp * 0.4);
 
     // Sutton–Graves-ish heating proxy ~ k v³ √ρ — for glow, not TPS sizing.
-    let heat = 1.83e-4 * v.powi(3) * air.density.max(0.0).sqrt();
+    let heat = 1.83e-4 * v * v * v * sqrt(air.density.max(0.0));
 
     Aero {
         force_body: f_body + f_fins,
@@ -145,7 +146,7 @@ pub fn propulsion(
     let gz = clamp(gimbal_z, -GIMBAL_MAX_RAD, GIMBAL_MAX_RAD);
     // Thrust is toward +X (interstage / "up" the stack). Exhaust leaves the
     // −X engine end. +gimbal_y adds a +Z component at the engines → +My.
-    let dir = Vec3::new(gy.cos() * gz.cos(), gz.sin(), gy.sin() * gz.cos()).normalized();
+    let dir = Vec3::new(cos(gy) * cos(gz), sin(gz), sin(gy) * cos(gz)).normalized();
     let thrust = thrust_one * n_engines as f64 * throttle;
     let force = dir * thrust;
     let r_eng = Vec3::new(-STAGE_LENGTH_M * 0.5, 0.0, 0.0);

@@ -3,7 +3,7 @@
 use crate::constants::{
     EARTH_E2, EARTH_J2, EARTH_MU, EARTH_OMEGA, EARTH_RADIUS_EQ, PAD_ALT_M, PAD_LAT_DEG, PAD_LON_DEG,
 };
-use crate::math::{Quat, Vec3};
+use crate::math::{atan, atan2, cos, sin, sqrt, Quat, Vec3};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Geodetic {
@@ -50,29 +50,29 @@ pub fn eci_vel_to_ecef_ground(r_eci: Vec3, v_eci: Vec3, t: f64) -> (Vec3, Vec3) 
 }
 
 pub fn geodetic_to_ecef(g: Geodetic) -> Vec3 {
-    let sin_lat = g.lat.sin();
-    let cos_lat = g.lat.cos();
-    let n = EARTH_RADIUS_EQ / (1.0 - EARTH_E2 * sin_lat * sin_lat).sqrt();
+    let sin_lat = sin(g.lat);
+    let cos_lat = cos(g.lat);
+    let n = EARTH_RADIUS_EQ / sqrt(1.0 - EARTH_E2 * sin_lat * sin_lat);
     Vec3::new(
-        (n + g.alt) * cos_lat * g.lon.cos(),
-        (n + g.alt) * cos_lat * g.lon.sin(),
+        (n + g.alt) * cos_lat * cos(g.lon),
+        (n + g.alt) * cos_lat * sin(g.lon),
         (n * (1.0 - EARTH_E2) + g.alt) * sin_lat,
     )
 }
 
 pub fn ecef_to_geodetic(r: Vec3) -> Geodetic {
-    let lon = r.y.atan2(r.x);
-    let p = (r.x * r.x + r.y * r.y).sqrt();
-    let mut lat = (r.z / p.max(1e-9)).atan();
+    let lon = atan2(r.y, r.x);
+    let p = sqrt(r.x * r.x + r.y * r.y);
+    let mut lat = atan(r.z / p.max(1e-9));
     for _ in 0..8 {
-        let sin = lat.sin();
-        let n = EARTH_RADIUS_EQ / (1.0 - EARTH_E2 * sin * sin).sqrt();
-        lat = (r.z + EARTH_E2 * n * sin).atan2(p);
+        let s = sin(lat);
+        let n = EARTH_RADIUS_EQ / sqrt(1.0 - EARTH_E2 * s * s);
+        lat = atan2(r.z + EARTH_E2 * n * s, p);
     }
-    let sin = lat.sin();
-    let n = EARTH_RADIUS_EQ / (1.0 - EARTH_E2 * sin * sin).sqrt();
-    let alt = if lat.cos().abs() > 1e-8 {
-        p / lat.cos() - n
+    let s = sin(lat);
+    let n = EARTH_RADIUS_EQ / sqrt(1.0 - EARTH_E2 * s * s);
+    let alt = if cos(lat).abs() > 1e-8 {
+        p / cos(lat) - n
     } else {
         r.z.abs() - n * (1.0 - EARTH_E2)
     };
@@ -81,10 +81,10 @@ pub fn ecef_to_geodetic(r: Vec3) -> Geodetic {
 
 /// Local ENU basis in ECEF components at `lat`, `lon`.
 pub fn enu_basis(lat: f64, lon: f64) -> (Vec3, Vec3, Vec3) {
-    let sin_lat = lat.sin();
-    let cos_lat = lat.cos();
-    let sin_lon = lon.sin();
-    let cos_lon = lon.cos();
+    let sin_lat = sin(lat);
+    let cos_lat = cos(lat);
+    let sin_lon = sin(lon);
+    let cos_lon = cos(lon);
     let east = Vec3::new(-sin_lon, cos_lon, 0.0);
     let north = Vec3::new(-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat);
     let up = Vec3::new(cos_lat * cos_lon, cos_lat * sin_lon, sin_lat);
@@ -125,14 +125,14 @@ pub fn periapsis_radius(r: Vec3, v: Vec3) -> f64 {
         return f64::INFINITY;
     }
     let arg = 1.0 + 2.0 * eps * h * h / (mu * mu);
-    let e = arg.max(0.0).sqrt();
+    let e = sqrt(arg.max(0.0));
     a * (1.0 - e)
 }
 
 /// J2 gravity in a frame whose +Z is Earth's rotation axis (ECI or ECEF).
 pub fn gravity_j2(r: Vec3) -> Vec3 {
     let r2 = r.norm_squared();
-    let r1 = r2.sqrt();
+    let r1 = sqrt(r2);
     if r1 < 1e5 {
         return Vec3::ZERO;
     }
@@ -196,7 +196,7 @@ mod tests {
     #[test]
     fn circular_periapsis_is_radius() {
         let r = Vec3::new(EARTH_RADIUS_EQ + 220_000.0, 0.0, 0.0);
-        let v_c = (EARTH_MU / r.norm()).sqrt();
+        let v_c = crate::math::sqrt(EARTH_MU / r.norm());
         let v = Vec3::new(0.0, v_c, 0.0);
         let rp = periapsis_radius(r, v);
         assert!((rp - r.norm()).abs() < 2_000.0, "rp={rp} r={}", r.norm());

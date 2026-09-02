@@ -5,6 +5,7 @@
 //! browser: one generation is a handful of 6DOF rollouts, no backprop.
 
 use crate::guidance::{TermReason, N_WEIGHTS};
+use crate::math::{cos, exp, ln, sqrt};
 use crate::scenario::Scenario;
 use crate::sim::run_episode_with;
 use crate::wind::Weather;
@@ -75,7 +76,7 @@ impl Trainer {
         let n = N_WEIGHTS;
         let mut weights_w = Vec::with_capacity(MU);
         for i in 0..MU {
-            weights_w.push(((MU as f64 + 0.5).ln() - ((i + 1) as f64).ln()).max(0.01));
+            weights_w.push((ln(MU as f64 + 0.5) - ln((i + 1) as f64)).max(0.01));
         }
         let sw: f64 = weights_w.iter().sum();
         for w in weights_w.iter_mut() {
@@ -232,7 +233,7 @@ impl Trainer {
 
         let c_sigma = (self.mu_eff + 2.0) / (n as f64 + self.mu_eff + 5.0);
         let d_sigma = 1.0
-            + 2.0 * (0.0f64).max(((self.mu_eff - 1.0) / (n as f64 + 1.0)).sqrt() - 1.0)
+            + 2.0 * (0.0f64).max(sqrt((self.mu_eff - 1.0) / (n as f64 + 1.0)) - 1.0)
             + c_sigma;
         let c_c = (4.0 + self.mu_eff / n as f64) / (n as f64 + 4.0 + 2.0 * self.mu_eff / n as f64);
         let c_1 = 2.0 / ((n as f64 + 1.3).powi(2) + self.mu_eff);
@@ -241,16 +242,16 @@ impl Trainer {
 
         for j in 0..n {
             self.ps[j] = (1.0 - c_sigma) * self.ps[j]
-                + ((c_sigma * (2.0 - c_sigma) * self.mu_eff).sqrt()) * zw[j];
+                + (sqrt(c_sigma * (2.0 - c_sigma) * self.mu_eff)) * zw[j];
         }
         let ps_norm = l2(&self.ps);
-        let chi_n = (n as f64).sqrt() * (1.0 - 1.0 / (4.0 * n as f64) + 1.0 / (21.0 * (n as f64).powi(2)));
-        self.sigma *= ((c_sigma / d_sigma) * (ps_norm / chi_n - 1.0)).exp();
+        let chi_n = sqrt(n as f64) * (1.0 - 1.0 / (4.0 * n as f64) + 1.0 / (21.0 * (n as f64).powi(2)));
+        self.sigma *= exp((c_sigma / d_sigma) * (ps_norm / chi_n - 1.0));
         self.sigma = self.sigma.clamp(0.02, 1.4);
 
         for j in 0..n {
             self.pc[j] = (1.0 - c_c) * self.pc[j]
-                + ((c_c * (2.0 - c_c) * self.mu_eff).sqrt()) * yw[j];
+                + (sqrt(c_c * (2.0 - c_c) * self.mu_eff)) * yw[j];
         }
 
         // C ← (1 − c1 − cμ) C + c1 pc pcᵀ + cμ Σ w y yᵀ
@@ -334,7 +335,7 @@ fn cholesky(a: &[f64], n: usize) -> Option<Vec<f64>> {
                 if s <= 1e-18 {
                     return None;
                 }
-                l[i * n + j] = s.sqrt();
+                l[i * n + j] = sqrt(s);
             } else {
                 l[i * n + j] = s / l[j * n + j];
             }
@@ -344,13 +345,13 @@ fn cholesky(a: &[f64], n: usize) -> Option<Vec<f64>> {
 }
 
 fn l2(v: &[f64]) -> f64 {
-    v.iter().map(|x| x * x).sum::<f64>().sqrt()
+    sqrt(v.iter().map(|x| x * x).sum::<f64>())
 }
 
 fn std_norm(rng: &mut SmallRng) -> f64 {
     let u1 = rng.gen::<f64>().clamp(1e-12, 1.0);
     let u2 = rng.gen::<f64>();
-    (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+    sqrt(-2.0 * ln(u1)) * cos(2.0 * std::f64::consts::PI * u2)
 }
 
 fn now_ms() -> f64 {
