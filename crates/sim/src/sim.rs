@@ -8,7 +8,7 @@ use crate::earth::{
 };
 use crate::guidance::{
     apply_residual, attitude_command, classify_phase, corridor_offset, corridor_violated,
-    evaluate_contact, features, fuel_infeasible, ground_hit, impact_destroy, nav_from,
+    evaluate_contact, features, fuel_infeasible_for, ground_hit, impact_destroy, nav_from,
     nominal_controls, policy_residual, success, Nav, Phase, TermReason, N_WEIGHTS,
 };
 use crate::math::{Quat, Vec3};
@@ -393,12 +393,12 @@ impl Sim {
         }
 
         let off = corridor_offset(eci_to_ecef(self.r_eci, self.t), self.start_ecef, pad_ecef());
-        let pad_overflight = self.scenario.is_orbital() && self.min_range_gc < 25_000.0;
+        let pad_overflight = self.scenario.is_orbital() && self.min_range_gc < 40_000.0;
         if corridor_violated(&self.last_nav, off, self.scenario) && !pad_overflight {
             self.term = TermReason::Corridor;
             return;
         }
-        if fuel_infeasible(&self.last_nav, self.phase) {
+        if fuel_infeasible_for(&self.last_nav, self.phase, self.scenario) {
             self.term = TermReason::FuelInfeasible;
             return;
         }
@@ -717,6 +717,52 @@ mod tests {
         assert!(
             reached >= 2,
             "expected ≥2/4 LEO nominals to reach landing intact, got {reached}"
+        );
+    }
+
+    #[test]
+    fn leo_nominal_landing_theater_is_fuel_feasible() {
+        // After #3 the burn latched 500 km past LZ-1 and the fuel bound
+        // tripped on the first landing tick. The skip must now put at
+        // least a few zero-residual episodes in the pad theater with
+        // enough RP-1 that the bound does not immediately fail.
+        use crate::guidance::fuel_infeasible_for;
+        let seeds = [3u32, 20, 54, 88];
+        let mut theater = 0u32;
+        for seed in seeds {
+            let mut sim = Sim::new_with(seed, true, 0.0, Scenario::LeoDeorbit, Weather::default());
+            let mut guard = 0;
+            while !sim.terminated() && guard < 140_000 {
+                sim.step(sim.adaptive_dt());
+                if sim.phase == Phase::Landing || sim.landing_latched {
+                    break;
+                }
+                guard += 1;
+            }
+            let range = sim.last_nav.range_gc.min(sim.last_nav.range_h);
+            let dry = fuel_infeasible_for(&sim.last_nav, sim.phase, sim.scenario);
+            if sim.intact
+                && (sim.phase == Phase::Landing || sim.landing_latched)
+                && range < LEO_LANDING_THEATER_M
+                && !dry
+                && sim.fuel > 2_000.0
+            {
+                theater += 1;
+            } else {
+                eprintln!(
+                    "seed {seed}: intact={} phase={:?} range={:.1} km fuel={:.0} dry={} term={}",
+                    sim.intact,
+                    sim.phase,
+                    range / 1000.0,
+                    sim.fuel,
+                    dry,
+                    sim.term.as_str()
+                );
+            }
+        }
+        assert!(
+            theater >= 2,
+            "expected ≥2/4 LEO nominals in a fuel-feasible landing theater, got {theater}"
         );
     }
 

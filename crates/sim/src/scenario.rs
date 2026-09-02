@@ -126,8 +126,14 @@ fn spawn_leo(rng: &mut impl Rng) -> Spawn {
     // Periapsis is west of the pad (eastbound capture) so the vehicle is
     // still inbound when the entry burn makes the orbit Earth-intersecting.
     let uprange_lon = LEO_PERI_UPRANGE_M / (EARTH_RADIUS_EQ * pad.lat.cos().max(0.3));
+    // Due-east at periapsis is the orbit's northern apex. Over
+    // `LEO_PERI_UPRANGE_M` of ground track the vehicle walks south of
+    // the parallel (~27 km at 920 km / 28.5°N). Start that far north
+    // so the skip crosses LZ-1 instead of passing 27 km south of it.
+    let ang = LEO_PERI_UPRANGE_M / EARTH_RADIUS_EQ;
+    let south_drop = (pad.lat - (pad.lat.sin() * ang.cos()).asin()).max(0.0);
     let peri_geo = Geodetic {
-        lat: pad.lat + 0.002 * (rng.gen::<f64>() - 0.5),
+        lat: pad.lat + south_drop + 0.002 * (rng.gen::<f64>() - 0.5),
         lon: pad.lon - lead - uprange_lon + 0.004 * (rng.gen::<f64>() - 0.5),
         alt: DEORBIT_PERI_TARGET_M,
     };
