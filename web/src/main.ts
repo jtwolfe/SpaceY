@@ -25,6 +25,7 @@ function qClass(q: number): string | undefined {
 async function main() {
   await init();
   const engine = new Engine();
+  (window as unknown as { spacey: Engine }).spacey = engine;
   let scene: SceneApp | null = null;
   try {
     scene = new SceneApp(document.querySelector("#view")!);

@@ -135,6 +135,21 @@ impl Engine {
         finished
     }
 
+    /// Step with native `adaptive_dt` until term or `max_s` of sim time.
+    /// Used so a 250× browser coast matches `cargo` / unit tests.
+    pub fn fast_forward(&mut self, max_s: f64) {
+        let t0 = self.display.t;
+        let limit = max_s.clamp(0.0, 8_000.0);
+        while !self.display.terminated() && self.display.t - t0 < limit {
+            let h = self.display.adaptive_dt();
+            self.display.step(h);
+        }
+    }
+
+    pub fn seed(&self) -> u32 {
+        self.seed
+    }
+
     /// Advance the display episode by `dt` seconds of *scene* time (already
     /// includes the caller's frame Δt; warp is applied here).
     pub fn step_display(&mut self, dt: f64) {
