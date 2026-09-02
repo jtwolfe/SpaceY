@@ -181,13 +181,21 @@ pub fn should_start_landing(nav: &Nav) -> bool {
 }
 
 pub fn should_start_landing_for(nav: &Nav, scenario: Scenario) -> bool {
-    let theater = if scenario.is_orbital() { 20_000.0 } else { 4_000.0 };
+    let theater = if scenario.is_orbital() {
+        LEO_LANDING_THEATER_M
+    } else {
+        4_000.0
+    };
     let range = if scenario.is_orbital() {
         nav.range_gc.min(nav.range_h)
     } else {
         nav.range_h
     };
     if nav.alt > 12_000.0 && range > theater {
+        return false;
+    }
+    // A hover-slam 500 km downrange is not a landing attempt.
+    if scenario.is_orbital() && range > LEO_LANDING_THEATER_M {
         return false;
     }
     if scenario.is_orbital() && range > 25_000.0 && nav.engine_alt > 8_000.0 {
@@ -240,71 +248,44 @@ pub fn nominal_controls(nav: &Nav, phase: Phase, scenario: Scenario) -> (Control
             }
         }
         Phase::Exo | Phase::Entry => {
+            let to_pad = Vec3::new(-nav.pos_enu.x, -nav.pos_enu.y, 0.0);
+            let closing = to_pad.norm() < 1.0
+                || nav.v_enu.x * to_pad.x + nav.v_enu.y * to_pad.y > 0.0;
+            let pred = predicted_landing_range(nav);
+            let overshoot = if closing {
+                pred - nav.range_gc.min(nav.range_h)
+            } else {
+                pred + nav.range_gc.min(nav.range_h)
+            };
             if nav.v_enu.norm() > 10.0 {
+                // Pure retrograde. A "dive" offset on a tail-first stack
+                // points the engines up and lofts the skip (seen at 80→101 km).
                 desired_x = -enu_to_approx(nav.v_enu.normalized(), nav);
             }
             if phase == Phase::Entry {
-                let pred = predicted_glide_range(nav);
-                let overshoot = pred - nav.range_h;
-                let to_pad = Vec3::new(-nav.pos_enu.x, -nav.pos_enu.y, 0.0);
-                let closing = to_pad.norm() < 1.0
-                    || nav.v_enu.x * to_pad.x + nav.v_enu.y * to_pad.y > 0.0;
                 let q_hot = nav.q > 28_000.0 && nav.speed > 480.0;
                 let hypersonic = nav.speed > 1_550.0;
                 let long = closing && overshoot > 6_000.0 && nav.speed > 500.0;
-                let reserve = if orbital {
-                    // Do not hold a landing reserve through a 200 kPa pulse.
-                    if (nav.q > 40_000.0 && nav.speed > 1_800.0)
-                        || (nav.range_gc < 30_000.0 && nav.speed > 800.0)
-                    {
-                        800.0
-                    } else if nav.speed > 2_000.0 {
-                        15_000.0
-                    } else if nav.speed > 1_500.0 {
-                        5_500.0
-                    } else {
-                        LEO_LANDING_FUEL_KG
-                    }
+                if orbital {
+                    leo_entry_burn(nav, closing, overshoot, &mut u);
                 } else {
-                    0.0
-                };
-                let fuel_ok = nav.fuel > reserve + 200.0;
-                if orbital && fuel_ok && nav.speed > 1_500.0 {
-                    // Q-hold far out; commit to a capture burn inside ~720 km
-                    // so we do not overfly the pad at 7 km/s in thin air.
-                    let q_tgt = 80_000.0;
-                    let hard = nav.range_gc < 720_000.0
-                        || (nav.range_gc < 40_000.0 && nav.speed > 800.0);
-                    if nav.q > 30_000.0 || hard {
-                        u.n_engines = N_ENGINES_ENTRY;
-                        let q_err = ((nav.q - 0.35 * q_tgt) / q_tgt).max(0.0);
-                        let v_need = if hard {
-                            ((nav.speed - 1_550.0) / 2_000.0).clamp(0.0, 1.0)
+                    let fuel_ok = nav.fuel > 200.0;
+                    if fuel_ok && (hypersonic || q_hot || long) {
+                        let need = if hypersonic {
+                            nav.speed - 1_400.0
+                        } else if q_hot {
+                            nav.speed - 380.0
                         } else {
-                            0.0
+                            overshoot / 12.0
                         };
-                        let mut thr = saturate(0.40 + 1.10 * q_err + 0.80 * v_need);
+                        u.n_engines = N_ENGINES_ENTRY;
+                        let mut thr = saturate(0.40 + need / 500.0);
                         let q_g = (nav.q * REF_AREA_M2 * 1.15 / nav.mass) / G0;
-                        if q_g > 12.0 {
-                            thr *= (12.0 / q_g).clamp(0.40, 1.0);
+                        if q_g > 6.3 {
+                            thr *= (9.0 / q_g.max(1.0)).clamp(0.40, 1.0);
                         }
                         u.throttle = saturate(thr);
                     }
-                } else if fuel_ok && (hypersonic || q_hot || long) {
-                    let need = if hypersonic {
-                        nav.speed - 1_400.0
-                    } else if q_hot {
-                        nav.speed - 380.0
-                    } else {
-                        overshoot / 12.0
-                    };
-                    u.n_engines = N_ENGINES_ENTRY;
-                    let mut thr = saturate(0.40 + need / 500.0);
-                    let q_g = (nav.q * REF_AREA_M2 * 1.15 / nav.mass) / G0;
-                    if q_g > 6.3 {
-                        thr *= (9.0 / q_g.max(1.0)).clamp(0.40, 1.0);
-                    }
-                    u.throttle = saturate(thr);
                 }
             }
         }
@@ -328,34 +309,49 @@ pub fn nominal_controls(nav: &Nav, phase: Phase, scenario: Scenario) -> (Control
         Phase::Landing => {
             let pz = nav.engine_alt.max(0.5);
             let vz = nav.v_enu.z;
-            // Hover-slam: track v_des(h) = −√(2 a h). Do NOT PD on kilometres
-            // of altitude — that commanded throttle=0 from 4 km (debug_ep).
-            let a_land = 8.0;
-            let v_des = -((2.0 * a_land * (pz - 4.0).max(0.0)).sqrt()).min(120.0);
-            let az_cmd = 2.2 * (v_des - vz) + G0 + if pz < 40.0 { 0.4 * (6.0 - pz) } else { 0.0 };
-            let t_max = MERLIN_THRUST_SL_N * N_ENGINES_LANDING as f64;
-            u.n_engines = N_ENGINES_LANDING;
-            if -vz > 80.0 || az_cmd * nav.mass > t_max * 0.90 {
+            // LEO arrives at the theater still hypersonic-ish. Snapping to a
+            // vertical hover-slam at 300 m/s / 20 kPa is a 60° AoA death.
+            // Stay tail-first / retrograde until the air is slow or thin.
+            let leo_retro = orbital
+                && nav.speed > 90.0
+                && (nav.q > 8_000.0 || nav.speed > 160.0)
+                && pz > 250.0;
+            if leo_retro {
+                if nav.v_enu.norm() > 10.0 {
+                    desired_x = -enu_to_approx(nav.v_enu.normalized(), nav);
+                }
                 u.n_engines = N_ENGINES_ENTRY;
-            }
-            let t_avail = MERLIN_THRUST_SL_N * u.n_engines as f64;
-            u.throttle = saturate(az_cmd.max(0.0) * nav.mass / t_avail.max(1.0));
-
-            let kp = if pz < 300.0 { 0.28 } else { 0.08 };
-            let kd = if pz < 300.0 { 0.75 } else { 0.40 };
-            // Don't chase a pad that is tens of km away — kill horizontal
-            // velocity first; divert only when the pad is in play.
-            let reach = if nav.range_h > 2_000.0 { 0.15 } else { 1.0 };
-            let ax = (-kp * nav.pos_enu.x - kd * nav.v_enu.x) * reach;
-            let ay = (-kp * nav.pos_enu.y - kd * nav.v_enu.y) * reach;
-            let horiz = (ax * ax + ay * ay).sqrt();
-            let max_tilt = if pz < 60.0 { 0.10 } else { 0.32 };
-            let tilt = (horiz / az_cmd.max(2.0)).min(max_tilt);
-            if horiz > 1e-4 {
-                let hdir = (nav.east * ax + nav.north * ay).normalized();
-                desired_x = (nav.up * tilt.cos() + hdir * tilt.sin()).normalized();
+                u.throttle = saturate(0.55 + (nav.speed - 90.0) / 400.0);
             } else {
-                desired_x = nav.up;
+                // Hover-slam: track v_des(h) = −√(2 a h). Do NOT PD on kilometres
+                // of altitude — that commanded throttle=0 from 4 km (debug_ep).
+                let a_land = 8.0;
+                let v_des = -((2.0 * a_land * (pz - 4.0).max(0.0)).sqrt()).min(120.0);
+                let az_cmd = 2.2 * (v_des - vz) + G0 + if pz < 40.0 { 0.4 * (6.0 - pz) } else { 0.0 };
+                let t_max = MERLIN_THRUST_SL_N * N_ENGINES_LANDING as f64;
+                u.n_engines = N_ENGINES_LANDING;
+                if -vz > 80.0 || az_cmd * nav.mass > t_max * 0.90 {
+                    u.n_engines = N_ENGINES_ENTRY;
+                }
+                let t_avail = MERLIN_THRUST_SL_N * u.n_engines as f64;
+                u.throttle = saturate(az_cmd.max(0.0) * nav.mass / t_avail.max(1.0));
+
+                let kp = if pz < 300.0 { 0.28 } else { 0.08 };
+                let kd = if pz < 300.0 { 0.75 } else { 0.40 };
+                // Don't chase a pad that is tens of km away — kill horizontal
+                // velocity first; divert only when the pad is in play.
+                let reach = if nav.range_h > 2_000.0 { 0.15 } else { 1.0 };
+                let ax = (-kp * nav.pos_enu.x - kd * nav.v_enu.x) * reach;
+                let ay = (-kp * nav.pos_enu.y - kd * nav.v_enu.y) * reach;
+                let horiz = (ax * ax + ay * ay).sqrt();
+                let max_tilt = if pz < 60.0 { 0.10 } else { 0.32 };
+                let tilt = (horiz / az_cmd.max(2.0)).min(max_tilt);
+                if horiz > 1e-4 {
+                    let hdir = (nav.east * ax + nav.north * ay).normalized();
+                    desired_x = (nav.up * tilt.cos() + hdir * tilt.sin()).normalized();
+                } else {
+                    desired_x = nav.up;
+                }
             }
         }
     }
@@ -368,11 +364,66 @@ fn enu_to_approx(v_enu: Vec3, nav: &Nav) -> Vec3 {
 }
 
 fn predicted_glide_range(nav: &Nav) -> f64 {
+    predicted_landing_range(nav)
+}
+
+/// Rough remaining ground range to impact. At 65 km / 4.7 km/s this
+/// was ~600 km vs a measured 490 km skip — good enough to trim.
+fn predicted_landing_range(nav: &Nav) -> f64 {
     let v_h = (nav.v_enu.x * nav.v_enu.x + nav.v_enu.y * nav.v_enu.y).sqrt();
-    let v_d = (-nav.v_enu.z).max(20.0);
-    // Very rough: current horiz speed × time-to-ground, with drag bleed.
+    let v_d = (-nav.v_enu.z).max(15.0);
     let t = nav.alt / v_d;
-    v_h * t * 0.55
+    let drag = (1.0 + nav.q / 50_000.0).min(3.5);
+    v_h * t * 0.55 / drag
+}
+
+/// LEO capture: vacuum slam only while inbound, then a Q-hold / overshoot
+/// trim that *protects* the landing reserve. The old `range < 720 km`
+/// gate stayed true after overflight and burned the tanks dry 400 km
+/// past LZ-1.
+fn leo_entry_burn(nav: &Nav, inbound: bool, overshoot: f64, u: &mut Controls) {
+    let q = nav.q;
+    // Survival burn only if we are about to trip LEO max-Q (250 kPa).
+    // Earlier dips into the landing reserve dried the tanks 30 km short.
+    let survive = q > 249_000.0;
+    let vacuum = inbound
+        && nav.range_gc < LEO_CAPTURE_RANGE_M
+        && nav.speed > 2_200.0
+        && nav.alt > 70_000.0
+        && q < 8_000.0;
+    let q_hold = q > 55_000.0 && nav.speed > 700.0;
+    let trim = inbound && overshoot > 80_000.0 && nav.speed > 1_200.0 && q > 12_000.0;
+    let near_pad = inbound && nav.range_gc < 25_000.0 && nav.speed > 700.0;
+
+    let reserve = if survive {
+        1_500.0
+    } else if vacuum {
+        LEO_PULSE_RESERVE_KG
+    } else {
+        LEO_LANDING_FUEL_KG
+    };
+    if nav.fuel <= reserve + 200.0 {
+        return;
+    }
+    if !(survive || vacuum || q_hold || trim || near_pad) {
+        return;
+    }
+
+    u.n_engines = N_ENGINES_ENTRY;
+    let q_tgt = 90_000.0;
+    let q_err = ((q - 0.30 * q_tgt) / q_tgt).max(0.0);
+    let v_need = ((nav.speed - 1_200.0) / 2_400.0).clamp(0.0, 1.0);
+    let o_need = (overshoot / 280_000.0).clamp(0.0, 1.0);
+    let mut thr = if vacuum {
+        saturate(0.70 + 0.30 * v_need)
+    } else {
+        saturate(0.40 + 1.00 * q_err + 0.55 * v_need + 0.50 * o_need)
+    };
+    let q_g = (q * REF_AREA_M2 * 1.15 / nav.mass) / G0;
+    if q_g > 12.0 {
+        thr *= (12.0 / q_g).clamp(0.40, 1.0);
+    }
+    u.throttle = saturate(thr);
 }
 
 pub fn attitude_command(
@@ -389,7 +440,7 @@ pub fn attitude_command(
     let err_body = Vec3::new(err.dot(body_x), err.dot(body_y), err.dot(body_z));
     // Slow rate command (≤ ~8 deg/s) so TVC cannot pump a tumble.
     let wmax = match phase {
-        Phase::Landing => 0.35,
+        Phase::Landing if q_dyn < 6_000.0 => 0.35,
         _ => 0.12,
     };
     let w_cmd_y = clamp(1.8 * err_body.y, -wmax, wmax);
@@ -405,7 +456,9 @@ pub fn attitude_command(
     let fin_pitch = clamp(ey * 2.2 / qn, -fin_lim, fin_lim) * fin_enable;
     let fin_yaw = clamp(ez * 2.2 / qn, -fin_lim, fin_lim) * fin_enable;
     let fin_roll = clamp(-omega.x * 1.4 / qn, -fin_lim, fin_lim) * fin_enable;
-    let gmax = if phase == Phase::Landing {
+    // Landing TVC only once Q is low. Gimbal at 15–30 kPa with 250 m/s
+    // still on the clock is the same tumble that killed entry burns.
+    let gmax = if phase == Phase::Landing && q_dyn < 6_000.0 {
         GIMBAL_MAX_RAD
     } else {
         0.0
@@ -539,6 +592,13 @@ pub fn corridor_offset(r_ecef: Vec3, start_ecef: Vec3, pad: Vec3) -> f64 {
 /// Conservative propulsive reachability. Aero braking is credited only while
 /// dynamic pressure can still do useful work.
 pub fn fuel_infeasible(nav: &Nav, phase: Phase) -> bool {
+    fuel_infeasible_for(nav, phase, Scenario::Rtls)
+}
+
+/// Fuel-to-pad bound. LEO only trips this in/near the landing theater —
+/// a 500 km skip that latches "landing" far from LZ-1 is a guidance miss,
+/// not an instant dry-tank call once the vehicle is actually over the pad.
+pub fn fuel_infeasible_for(nav: &Nav, phase: Phase, scenario: Scenario) -> bool {
     if phase == Phase::Deorbit || phase == Phase::Exo || phase == Phase::Entry {
         return false;
     }
@@ -546,16 +606,36 @@ pub fn fuel_infeasible(nav: &Nav, phase: Phase) -> bool {
         return true;
     }
     let dv_fuel = MERLIN_ISP_SL_S * G0 * (nav.mass / DRY_MASS_KG.max(1.0)).ln();
+    let v_down = (-nav.v_enu.z).max(0.0);
+    let v_h = (nav.v_enu.x * nav.v_enu.x + nav.v_enu.y * nav.v_enu.y).sqrt();
+    let range = if scenario.is_orbital() {
+        nav.range_gc.min(nav.range_h)
+    } else {
+        nav.range_h
+    };
+
+    if scenario.is_orbital()
+        && (phase == Phase::Landing || (nav.alt < 10_000.0 && range < LEO_LANDING_THEATER_M))
+    {
+        // Honest: a hover-slam cannot translate 80+ km.
+        if range > LEO_PAD_REACH_M {
+            return true;
+        }
+        // In theater: only fail if we cannot kill the remaining velocity.
+        // Do not trip on the first landing tick when tanks still hold a
+        // landing reserve (~8 t → ~750 m/s).
+        let need = v_down + 0.40 * v_h + 60.0;
+        return dv_fuel < need * 0.40;
+    }
+
     if phase == Phase::Landing {
-        let v_down = (-nav.v_enu.z).max(0.0);
-        let v_h = (nav.v_enu.x * nav.v_enu.x + nav.v_enu.y * nav.v_enu.y).sqrt();
         return dv_fuel < (v_down + v_h) * 0.45;
     }
     // Only trip in the lower atmosphere, and credit aero braking generously.
     if nav.alt > 18_000.0 {
         return false;
     }
-    let t_go = (nav.alt / (-nav.v_enu.z).max(30.0)).min(120.0);
+    let t_go = (nav.alt / v_down.max(30.0)).min(120.0);
     let a_aero = (nav.q * REF_AREA_M2 * 0.9 / nav.mass).min(40.0);
     let dv_aero = a_aero * t_go * 0.55;
     let need = (nav.speed - dv_aero).max(0.0) + 0.25 * G0 * t_go;

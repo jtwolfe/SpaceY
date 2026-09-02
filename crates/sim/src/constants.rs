@@ -81,25 +81,42 @@ pub const RATE_DESTROY_RAD_S: f64 = 3.5;
 /// reach this energy; the same F9-class vehicle is flown from a circular
 /// ~220 km / ~7.8 km/s inertial state to exercise deorbit → entry → landing.
 pub const ORBITAL_ALT_M: f64 = 220_000.0;
-pub const ORBITAL_START_FUEL_KG: f64 = 65_000.0;
+/// LEO start load. Still a deorbit remnant (~18% of the 396 t ascent
+/// tank), **not** a first-stage ascent fill. The extra vs RTLS 40 t is
+/// the hypersonic capture plus an 8 t landing reserve so the Q-pulse
+/// does not dry the tanks 500 km past LZ-1.
+pub const ORBITAL_START_FUEL_KG: f64 = 70_000.0;
 /// Periapsis after the retrograde deorbit. High enough to avoid a 20 g
 /// brick, low enough that a 3-engine entry burn can capture.
 pub const DEORBIT_PERI_TARGET_M: f64 = 80_000.0;
 /// Once osculating periapsis is at or below this, never re-open the
 /// deorbit burn — J2 makes the Keplerian periapsis wander a few km.
 pub const DEORBIT_PERI_DONE_M: f64 = 83_000.0;
-/// Place periapsis *uprange* (west) of LZ-1. The vehicle is eastbound, so
-/// the capture burn and the fall after periapsis happen on the way to the
-/// pad instead of over it (which would overshoot by hundreds of km).
-pub const LEO_PERI_UPRANGE_M: f64 = 550_000.0;
+/// Place periapsis *uprange* (west) of LZ-1. After the vacuum capture
+/// the vehicle still overflies at ~65 km / ~5 km/s and skips ~500 km;
+/// this offset puts that skip's landing near the pad instead of 500 km
+/// east of it.
+pub const LEO_PERI_UPRANGE_M: f64 = 920_000.0;
 /// Open the entry *phase* once the pad is this close. The burn itself is
 /// gated by a speed-vs-range schedule so we do not drop short.
-pub const LEO_ENTRY_RANGE_M: f64 = 900_000.0;
-/// RP-1 reserved for the landing burn after the entry burn.
-pub const LEO_LANDING_FUEL_KG: f64 = 10_000.0;
+pub const LEO_ENTRY_RANGE_M: f64 = 1_400_000.0;
+/// Inbound range at which the 3-engine vacuum capture may start.
+/// Must sit *before* periapsis (see `LEO_PERI_UPRANGE_M`).
+pub const LEO_CAPTURE_RANGE_M: f64 = 1_220_000.0;
+/// RP-1 reserved for the landing burn. Held through the vacuum capture
+/// and only dipped into if a Q-pulse would otherwise break the airframe.
+pub const LEO_LANDING_FUEL_KG: f64 = 8_000.0;
+/// Extra propellant kept through the vacuum slam so the atmospheric
+/// pulse can still brake without going dry. Landing reserve is inside this.
+pub const LEO_PULSE_RESERVE_KG: f64 = 15_000.0;
+/// Landing latch / fuel-to-pad theater. Outside this, a hover-slam
+/// cannot reach LZ-1.
+pub const LEO_LANDING_THEATER_M: f64 = 50_000.0;
+/// Fuel-to-pad bound: further than this in LANDING is infeasible.
+pub const LEO_PAD_REACH_M: f64 = 80_000.0;
 /// Pad-ENU corridor is meaningless until the vehicle is in this theater.
 pub const LEO_CORRIDOR_THEATER_M: f64 = 700_000.0;
-pub const LEO_CORRIDOR_PAD_M: f64 = 6_000.0;
+pub const LEO_CORRIDOR_PAD_M: f64 = 18_000.0;
 pub const LEO_CORRIDOR_SLOPE: f64 = 28.0;
 /// Cold-gas RCS angular acceleration (vacuum attitude hold). F9-class
 /// nitrogen thrusters; not deducted from RP-1.
