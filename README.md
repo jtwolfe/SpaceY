@@ -58,7 +58,7 @@ Cited from SpaceX Falcon 9 user's guide figures, FAA/environmental filings, and 
 | Stage + interstage length | 47 m | Full stack ~70 m |
 | Stage-1 dry mass | 25 600 kg | Published estimates ~22–27 t |
 | Ascent propellant capacity | 395 700 kg | LOX + RP-1; **not** the start load |
-| Scenario start fuel | 40 000 kg RTLS / 70 000 kg LEO | After ascent + boostback; LEO carries more for the hypersonic capture + an 8 t landing reserve (still ≪ 396 t ascent) |
+| Scenario start fuel | 40 000 kg RTLS / 78 000 kg LEO | After ascent + boostback; LEO carries more for the hypersonic capture + a pad-theater landing stash (still ≪ 396 t ascent) |
 | Merlin 1D SL / vac | 845 / 914 kN | Block 5 public figures |
 | Merlin 1D Isp SL / vac | 282 / 311 s | Same |
 | Landing / entry engines | 1 or 3 | Center or cluster |
@@ -69,7 +69,7 @@ Cited from SpaceX Falcon 9 user's guide figures, FAA/environmental filings, and 
 
 **LEO** start is a circular ~220 km / ~7.8 km/s inertial state on a plane that overflies LZ-1 after a retrograde deorbit and a half-rev coast. Density at that altitude is thermospheric (~10⁻¹⁰ kg/m³). Use 100–250× time warp for the exoatmospheric coast. The same Merlin-class stack then flies hypersonic entry → grid fins → landing burn. Surviving 7.8 km/s on a first-stage airframe is the training problem — not a claim that Falcon 9 stages do this.
 
-The LEO **nominal** (zero residual, destruction on) is built to reach a landing-burn attempt **near LZ-1** a meaningful fraction of the time: vacuum RCS holds tail-first through coast, the pad-ENU corridor is ignored until the landing theater, deorbit is a single-engine ~50 m/s burn that latches, and the entry law is a Q-hold plus an inbound-only capture burn. Periapsis is placed ~920 km west and slightly north of the pad so the ~500 km skip after a 5 km/s / 65 km overflight crosses LZ-1 (a due-east periapsis is the orbit apex and would walk ~27 km south) with an 8 t reserve instead of going dry 500 km downrange. LEO structural limits are higher than RTLS (Q 250 kPa / 18 g) — still fatal for an unburned 7.8 km/s dive, not a destruction-off cheat.
+The LEO **nominal** (zero residual, destruction on) is built to **soft-land at LZ-1** a meaningful fraction of the time: vacuum RCS holds tail-first through coast, the pad-ENU corridor is ignored until the landing theater, deorbit is a single-engine ~50 m/s burn that latches, and the entry law is a Q-hold plus an inbound-only capture burn. Periapsis is placed ~724 km west and slightly north of the pad so the ~500 km skip after a 5 km/s / 65 km overflight crosses LZ-1 (a due-east periapsis is the orbit apex and would walk ~27 km south). The Q-hold may spend down to a ~3.8 t stash so the pulse brakes instead of coasting into a 249 kPa spike; the landing burn then commits in the pad theater and suicide-brakes into the success box instead of hovering a T/W>1 stack at 1 km or sliding 50 km east. ECI→ECEF uses −ω t so a zero-ground-speed stack actually stays over LZ-1 (the opposite sign walked ~0.8 km/s east). LEO structural limits are higher than RTLS (Q 250 kPa / 18 g) — still fatal for an unburned 7.8 km/s dive, not a destruction-off cheat.
 
 ## How training works
 

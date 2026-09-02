@@ -16,8 +16,15 @@ pub fn deg(d: f64) -> f64 {
     d * std::f64::consts::PI / 180.0
 }
 
+/// ECI → ECEF rotation about +Z. Earth spins *east*, so the ECEF axes
+/// rotate west relative to inertial: angle = −ω t. At t = 0 the frames
+/// coincide.
+///
+/// The opposite sign made `d(r_ecef)/dt = v_ground + 2 ω × r`. A stack
+/// that had killed pad-ENU velocity still walked ~0.8 km/s east — the
+/// #4 50 km dry slide after a pad-theater intercept.
 pub fn earth_angle(t: f64) -> f64 {
-    EARTH_OMEGA * t
+    -EARTH_OMEGA * t
 }
 
 /// ECI and ECEF share +Z (Earth axis). At t = 0 the frames coincide.
@@ -193,5 +200,56 @@ mod tests {
         let v = Vec3::new(0.0, v_c, 0.0);
         let rp = periapsis_radius(r, v);
         assert!((rp - r.norm()).abs() < 2_000.0, "rp={rp} r={}", r.norm());
+    }
+
+    #[test]
+    fn ground_fixed_pad_stays_in_ecef() {
+        let pad = pad_ecef();
+        let omega = Vec3::new(0.0, 0.0, EARTH_OMEGA);
+        for t in [0.0, 10.0, 200.0, 2_520.0] {
+            let r_eci = ecef_to_eci(pad, t);
+            // Inertial velocity of a point fixed on the rotating Earth.
+            let v_eci = omega.cross(r_eci);
+            let (r_ecef, v_g) = eci_vel_to_ecef_ground(r_eci, v_eci, t);
+            assert!(
+                (r_ecef - pad).norm() < 1.0,
+                "t={t} drift={} m",
+                (r_ecef - pad).norm()
+            );
+            assert!(v_g.norm() < 0.05, "t={t} v_ground={} m/s", v_g.norm());
+        }
+    }
+
+    #[test]
+    fn ecef_position_tracks_ground_velocity() {
+        // Finite-difference: a free ballistic step must move r_ecef at v_ground,
+        // not at v_ground + 2 ω × r (~0.8 km/s east at the Cape).
+        let pad = pad_ecef();
+        let (east, _, up) = enu_basis(pad_geodetic().lat, pad_geodetic().lon);
+        let r_ecef0 = pad + up * 1_200.0 + east * 400.0;
+        let v_ground0 = east * 30.0 + up * -80.0;
+        let t = 2_780.0;
+        let r_eci = ecef_to_eci(r_ecef0, t);
+        let v_inertial_ecef = v_ground0 + Vec3::new(0.0, 0.0, EARTH_OMEGA).cross(r_ecef0);
+        let v_eci = q_eci_to_ecef(t).conjugate().rotate(v_inertial_ecef);
+        let dt = 0.20;
+        let (_, vg) = eci_vel_to_ecef_ground(r_eci, v_eci, t);
+        let r_eci1 = r_eci + v_eci * dt;
+        let (r1, _) = eci_vel_to_ecef_ground(r_eci1, v_eci, t + dt);
+        let dr = r1 - r_ecef0;
+        let err = (dr - vg * dt).norm();
+        assert!(
+            err < 8.0,
+            "pos/vel inconsistency {err} m (dr={}, vg dt={})",
+            dr.norm(),
+            vg.norm() * dt
+        );
+        let enu0 = ecef_to_enu(r_ecef0, pad, pad_geodetic().lat, pad_geodetic().lon);
+        let enu1 = ecef_to_enu(r1, pad, pad_geodetic().lat, pad_geodetic().lon);
+        assert!(
+            (enu1.x - enu0.x - 30.0 * dt).abs() < 4.0,
+            "east walk {} vs 30 m/s",
+            (enu1.x - enu0.x) / dt
+        );
     }
 }

@@ -122,6 +122,9 @@ fn spawn_leo(rng: &mut impl Rng) -> Spawn {
     let pad = pad_geodetic();
     // Half-period of a 220 km circular orbit is ~44 min; Earth rotates ~11°.
     let coast = 2_520.0 + 30.0 * (rng.gen::<f64>() - 0.5);
+    // Earth rotates east during the coast, so ECEF lon = ECI lon − ω t.
+    // Place the inertial periapsis *east* of the desired ECEF periapsis
+    // by ω·coast so the skip still happens ~920 km west of LZ-1.
     let lead = EARTH_OMEGA * coast;
     // Periapsis is west of the pad (eastbound capture) so the vehicle is
     // still inbound when the entry burn makes the orbit Earth-intersecting.
@@ -132,9 +135,13 @@ fn spawn_leo(rng: &mut impl Rng) -> Spawn {
     // so the skip crosses LZ-1 instead of passing 27 km south of it.
     let ang = LEO_PERI_UPRANGE_M / EARTH_RADIUS_EQ;
     let south_drop = (pad.lat - (pad.lat.sin() * ang.cos()).asin()).max(0.0);
+    // After the ECEF sign fix the skip walks further south than the
+    // spherical due-east estimate. Scale so overflight is within
+    // ~1–2 km of LZ-1; a 2 t landing burn cannot translate 11 km.
+    let south_drop = south_drop * 1.27;
     let peri_geo = Geodetic {
-        lat: pad.lat + south_drop + 0.002 * (rng.gen::<f64>() - 0.5),
-        lon: pad.lon - lead - uprange_lon + 0.004 * (rng.gen::<f64>() - 0.5),
+        lat: pad.lat + south_drop + 0.0006 * (rng.gen::<f64>() - 0.5),
+        lon: pad.lon + lead - uprange_lon + 0.003 * (rng.gen::<f64>() - 0.5),
         alt: DEORBIT_PERI_TARGET_M,
     };
     let r_peri = geodetic_to_ecef(peri_geo);
