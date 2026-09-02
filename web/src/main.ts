@@ -25,7 +25,12 @@ function qClass(q: number): string | undefined {
 async function main() {
   await init();
   const engine = new Engine();
-  const scene = new SceneApp(document.querySelector("#view")!);
+  let scene: SceneApp | null = null;
+  try {
+    scene = new SceneApp(document.querySelector("#view")!);
+  } catch (err) {
+    console.error("WebGL scene failed; HUD will still run.", err);
+  }
 
   const veh = document.querySelector("#veh-hud")!;
   const aero = document.querySelector("#aero-hud")!;
@@ -90,7 +95,7 @@ async function main() {
   document.querySelector("#btn-pause")!.addEventListener("click", () => engine.pause_training());
   document.querySelector("#btn-reset")!.addEventListener("click", () => {
     engine.reset((Math.random() * 1e9) >>> 0);
-    scene.resetTrail();
+    scene?.resetTrail();
   });
   document.querySelector("#tog-destroy")!.addEventListener("change", (e) => {
     engine.set_destruction((e.target as HTMLInputElement).checked);
@@ -104,7 +109,7 @@ async function main() {
     b.addEventListener("click", () => {
       document.querySelectorAll(".cam").forEach((x) => x.classList.remove("on"));
       b.classList.add("on");
-      scene.camMode = b.dataset.cam as CamMode;
+      if (scene) scene.camMode = b.dataset.cam as CamMode;
     });
   });
   document.querySelectorAll<HTMLButtonElement>(".warp").forEach((b) => {
@@ -124,9 +129,11 @@ async function main() {
     engine.step_display(dt);
     snap = JSON.parse(engine.snapshot_json()) as Snapshot;
     const train = JSON.parse(engine.train_json()) as TrainInfo;
-    scene.apply(snap);
-    scene.tickDebris(dt);
-    scene.render();
+    if (scene) {
+      scene.apply(snap);
+      scene.tickDebris(dt);
+      scene.render();
+    }
     paint(snap, train);
     requestAnimationFrame(loop);
   };
@@ -136,5 +143,6 @@ async function main() {
 
 main().catch((err) => {
   console.error(err);
-  document.querySelector("#mission-status")!.textContent = "WASM LOAD FAILED";
+  const el = document.querySelector("#mission-status");
+  if (el) el.textContent = err instanceof Error ? err.message.slice(0, 48) : "INIT FAILED";
 });

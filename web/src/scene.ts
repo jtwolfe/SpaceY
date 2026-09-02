@@ -85,10 +85,17 @@ export class SceneApp {
   private trailPts: THREE.Vector3[] = [];
   private pad: THREE.Group;
   private sun = new THREE.DirectionalLight(0xfff4e0, 2.2);
+  private camReady = false;
+  private marker: THREE.Sprite;
 
   constructor(canvas: HTMLCanvasElement) {
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, logarithmicDepthBuffer: true });
-    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    const opts = { canvas, antialias: true, failIfMajorPerformanceCaveat: false as const };
+    try {
+      this.renderer = new THREE.WebGLRenderer({ ...opts, logarithmicDepthBuffer: true });
+    } catch {
+      this.renderer = new THREE.WebGLRenderer(opts);
+    }
+    this.renderer.setPixelRatio(Math.min(typeof devicePixelRatio === "number" ? devicePixelRatio : 1, 2));
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
     this.scene.background = new THREE.Color(0x02040a);
@@ -151,6 +158,18 @@ export class SceneApp {
     const tgeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
     this.trail = new THREE.Line(tgeo, new THREE.LineBasicMaterial({ color: 0x7ee0ff, transparent: true, opacity: 0.65 }));
     this.scene.add(this.trail);
+
+    const mark = document.createElement("canvas");
+    mark.width = mark.height = 64;
+    const mg = mark.getContext("2d")!;
+    const grd = mg.createRadialGradient(32, 32, 2, 32, 32, 30);
+    grd.addColorStop(0, "rgba(255,240,200,1)");
+    grd.addColorStop(0.3, "rgba(126,224,255,0.85)");
+    grd.addColorStop(1, "rgba(126,224,255,0)");
+    mg.fillStyle = grd;
+    mg.fillRect(0, 0, 64, 64);
+    this.marker = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(mark), transparent: true, depthWrite: false }));
+    this.scene.add(this.marker);
 
     this.scene.add(this.debris);
     this.resize();
@@ -253,6 +272,9 @@ export class SceneApp {
     );
     this.rocket.position.copy(pos);
     this.rocket.quaternion.copy(mapped.clone().multiply(qEcef).multiply(bodyToThree));
+    this.marker.position.copy(pos);
+    this.marker.visible = this.camMode !== "chase";
+    this.marker.scale.setScalar(this.camMode === "orbit" ? 12_000 : 400);
 
     const [padx, pady, padz] = s.pad_ecef;
     this.pad.position.set(padx, padz, -pady);
@@ -290,12 +312,13 @@ export class SceneApp {
   resetTrail() {
     this.trailPts = [];
     this.debris.clear();
+    this.camReady = false;
   }
 
   private spawnDebris(pos: THREE.Vector3) {
     for (let i = 0; i < 18; i++) {
       const m = new THREE.Mesh(
-        new THREE.BoxGeometry(1 + Math.random() * 3, 0.4 + Math.random() * 2, 0.6 + Math.random()),
+        new THREE.BoxGeometry(4 + Math.random() * 8, 1 + Math.random() * 4, 1 + Math.random() * 3),
         new THREE.MeshStandardMaterial({ color: 0xbbb4a8, metalness: 0.4 }),
       );
       m.position.copy(pos);
@@ -320,26 +343,31 @@ export class SceneApp {
   private updateCamera(s: Snapshot, pos: THREE.Vector3, up: THREE.Vector3) {
     const pad = this.pad.position;
     if (this.camMode === "chase") {
-      const back = new THREE.Vector3(0, -1, 0).applyQuaternion(this.rocket.quaternion).multiplyScalar(90);
-      const side = new THREE.Vector3(1, 0.35, 0.4).applyQuaternion(this.rocket.quaternion).multiplyScalar(28);
+      const back = new THREE.Vector3(0, -1, 0).applyQuaternion(this.rocket.quaternion).multiplyScalar(110);
+      const side = new THREE.Vector3(1, 0.45, 0.35).applyQuaternion(this.rocket.quaternion).multiplyScalar(36);
       const camPos = pos.clone().add(back).add(side);
-      this.camera.position.lerp(camPos, 0.18);
+      if (!this.camReady) this.camera.position.copy(camPos);
+      else this.camera.position.lerp(camPos, 0.22);
       this.camera.up.copy(up);
       this.camera.lookAt(pos);
     } else if (this.camMode === "pad") {
-      const radial = up.clone().multiplyScalar(180);
-      const east = new THREE.Vector3(0, 1, 0).cross(up).normalize().multiplyScalar(220);
+      const radial = up.clone().multiplyScalar(220);
+      const east = new THREE.Vector3(0, 1, 0).cross(up).normalize().multiplyScalar(260);
       this.camera.position.copy(pad).add(radial).add(east);
       this.camera.up.copy(up);
-      this.camera.lookAt(pos);
+      this.camera.lookAt(s.range_h < 80_000 ? pos : pad.clone().add(up.clone().multiplyScalar(40_000)));
     } else {
-      const mid = pos.clone().add(pad).multiplyScalar(0.5);
-      const n = mid.clone().normalize();
-      const dist = Math.max(pos.distanceTo(pad) * 1.8, 280_000);
-      this.camera.position.copy(n.multiplyScalar(EARTH_R + dist));
-      this.camera.up.set(0, 1, 0);
-      this.camera.lookAt(mid);
+      const n = pad.clone().normalize();
+      const tangent = new THREE.Vector3(0, 1, 0).cross(n);
+      if (tangent.lengthSq() < 1e-6) tangent.set(1, 0, 0);
+      tangent.normalize();
+      this.camera.position.copy(
+        n.clone().multiplyScalar(EARTH_R + 2_800_000).add(tangent.multiplyScalar(900_000)),
+      );
+      this.camera.up.copy(n);
+      this.camera.lookAt(new THREE.Vector3(0, 0, 0));
     }
+    this.camReady = true;
     this.camera.near = this.camMode === "orbit" ? 2000 : 2;
     this.camera.far = 8e7;
     this.camera.updateProjectionMatrix();
