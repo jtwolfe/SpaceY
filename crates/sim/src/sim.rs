@@ -7,14 +7,14 @@ use crate::earth::{
     periapsis_radius,
 };
 use crate::guidance::{
-    apply_residual, attitude_command, classify_phase, corridor_offset, corridor_radius_for,
+    apply_residual, attitude_command, classify_phase, corridor_offset, corridor_violated,
     evaluate_contact, features, fuel_infeasible, ground_hit, impact_destroy, nav_from,
     nominal_controls, policy_residual, success, Nav, Phase, TermReason, N_WEIGHTS,
 };
 use crate::math::{Quat, Vec3};
 use crate::constants::inertia_diag;
 use crate::scenario::Scenario;
-use crate::vehicle::{aero, check_destruction, propulsion, DestroyReason};
+use crate::vehicle::{aero, check_destruction_limits, propulsion, rcs_moment, DestroyReason};
 use crate::wind::{Weather, Wind};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
@@ -42,6 +42,9 @@ pub struct Sim {
     pub weights: Vec<f64>,
     pub start_ecef: Vec3,
     pub landing_latched: bool,
+    pub deorbit_complete: bool,
+    pub entry_latched: bool,
+    pub min_range_gc: f64,
     pub intact: bool,
     pub destroy_reason: DestroyReason,
     pub term: TermReason,
@@ -99,6 +102,9 @@ impl Sim {
             weights: vec![0.0; N_WEIGHTS],
             start_ecef: spawn.start_ecef,
             landing_latched: false,
+            deorbit_complete: false,
+            entry_latched: false,
+            min_range_gc: f64::INFINITY,
             intact: true,
             destroy_reason: DestroyReason::None,
             term: TermReason::None,
@@ -131,7 +137,13 @@ impl Sim {
             seed,
         };
         s.refresh_nav();
-        s.phase = classify_phase(&s.last_nav, s.landing_latched);
+        s.phase = classify_phase(
+            &s.last_nav,
+            s.landing_latched,
+            s.deorbit_complete,
+            s.entry_latched,
+            s.scenario,
+        );
         s
     }
 
@@ -155,9 +167,13 @@ impl Sim {
                 0.02
             }
         } else if self.last_nav.alt > 150_000.0 && self.last_aero_q < 50.0 {
-            0.80
+            1.20
         } else if self.last_nav.alt > 65_000.0 && self.last_aero_q < 200.0 {
             0.20
+        } else if self.last_aero_q > 40_000.0 {
+            0.008
+        } else if self.last_aero_q > 15_000.0 {
+            0.012
         } else if self.last_nav.alt > 25_000.0 && self.last_aero_q < 8_000.0 {
             0.07
         } else if self.last_nav.engine_alt > 2_000.0 {
@@ -196,6 +212,9 @@ impl Sim {
             wet_mass(self.fuel),
         );
         nav.periapsis_alt = peri_alt;
+        if nav.range_gc < self.min_range_gc {
+            self.min_range_gc = nav.range_gc;
+        }
         self.last_nav = nav;
     }
 
@@ -203,7 +222,12 @@ impl Sim {
         if self.terminated() {
             return;
         }
-        let dt = dt.clamp(0.001, 0.5);
+        let dt_max = if self.last_nav.alt > 140_000.0 && self.last_aero_q < 20.0 {
+            1.50
+        } else {
+            0.50
+        };
+        let dt = dt.clamp(0.001, dt_max);
         let mut rng = SmallRng::seed_from_u64((self.seed as u64).wrapping_add((self.t * 1e4) as u64));
         self.wind.step(dt, &mut rng);
 
@@ -218,17 +242,38 @@ impl Sim {
         let v_rel_body = self.q_body_to_eci.conjugate().rotate(v_air_eci);
 
         self.refresh_nav();
-        if !self.landing_latched && crate::guidance::should_start_landing(&self.last_nav) {
+        if !self.landing_latched
+            && crate::guidance::should_start_landing_for(&self.last_nav, self.scenario)
+        {
             self.landing_latched = true;
         }
-        self.phase = classify_phase(&self.last_nav, self.landing_latched);
+        if !self.deorbit_complete && self.last_nav.periapsis_alt <= DEORBIT_PERI_DONE_M {
+            self.deorbit_complete = true;
+        }
+        self.phase = classify_phase(
+            &self.last_nav,
+            self.landing_latched,
+            self.deorbit_complete,
+            self.entry_latched,
+            self.scenario,
+        );
+        if self.phase == Phase::Entry {
+            self.entry_latched = true;
+        }
 
-        let (mut u, desired_x) = nominal_controls(&self.last_nav, self.phase);
+        let (mut u, desired_x) = nominal_controls(&self.last_nav, self.phase, self.scenario);
         let body_x = q_e.rotate(self.q_body_to_eci.rotate(Vec3::X));
         let body_y = q_e.rotate(self.q_body_to_eci.rotate(Vec3::Y));
         let body_z = q_e.rotate(self.q_body_to_eci.rotate(Vec3::Z));
-        let (gy, gz, fp, fy, fr) =
-            attitude_command(body_x, body_y, body_z, self.omega_body, desired_x, self.phase);
+        let (gy, gz, fp, fy, fr) = attitude_command(
+            body_x,
+            body_y,
+            body_z,
+            self.omega_body,
+            desired_x,
+            self.phase,
+            self.last_aero_q,
+        );
         u.gimbal_y = gy;
         u.gimbal_z = gz;
         u.fin_pitch = fp;
@@ -266,22 +311,30 @@ impl Sim {
 
         let mass = wet_mass(self.fuel).max(DRY_MASS_KG);
         let f_body = a.force_body + burn.force_body;
-        let damp = a.q * REF_AREA_M2 * 18.0;
+        let damp = a.q * REF_AREA_M2 * 28.0;
         let w0 = self.omega_body;
-        let m_body = a.moment_body + burn.moment_body
-            + Vec3::new(-damp * 0.15 * w0.x, -damp * w0.y, -damp * w0.z);
+        let err = body_x.cross(desired_x.normalized());
+        let err_body = Vec3::new(err.dot(body_x), err.dot(body_y), err.dot(body_z));
+        let i = inertia_diag(mass);
+        let m_rcs = rcs_moment(self.omega_body, err_body, i, a.q);
+        let m_body = a.moment_body + burn.moment_body + m_rcs
+            + Vec3::new(-damp * 1.1 * w0.x, -damp * w0.y, -damp * w0.z);
         let a_body = f_body / mass;
         let a_eci = gravity_j2(self.r_eci) + self.q_body_to_eci.rotate(a_body);
         self.last_accel_g = a_eci.norm() / G0;
 
-        let i = inertia_diag(mass);
         let w = self.omega_body;
         let i_w = Vec3::new(i.x * w.x, i.y * w.y, i.z * w.z);
-        let wdot = Vec3::new(
+        let mut wdot = Vec3::new(
             (m_body.x - (w.y * i_w.z - w.z * i_w.y)) / i.x.max(1.0),
             (m_body.y - (w.z * i_w.x - w.x * i_w.z)) / i.y.max(1.0),
             (m_body.z - (w.x * i_w.y - w.y * i_w.x)) / i.z.max(1.0),
         );
+        // Fins + cold-gas cannot produce 100 rad/s². A stiff weathercock /
+        // fin PIO under-sampled at 12–70 ms will, and then the spin check
+        // fires on a numerical tumble. Cap specific torque to a physical band.
+        let wdot_max = if a.q > 8_000.0 { 1.6 } else { 2.4 };
+        wdot = wdot.clamp_norm(wdot_max);
 
         // Semi-implicit Euler — stable enough with our adaptive dt.
         self.v_eci += a_eci * dt;
@@ -293,12 +346,26 @@ impl Sim {
 
         self.refresh_nav();
 
-        let dest = check_destruction(
+        let (q_lim, g_lim, qa_lim, rate_lim) = if self.scenario.is_orbital() {
+            (
+                LEO_Q_DESTROY_PA,
+                LEO_G_DESTROY,
+                LEO_Q_ALPHA_DESTROY,
+                LEO_RATE_DESTROY_RAD_S,
+            )
+        } else {
+            (Q_DESTROY_PA, G_DESTROY, Q_ALPHA_DESTROY, RATE_DESTROY_RAD_S)
+        };
+        let dest = check_destruction_limits(
             self.last_aero_q,
             self.last_aoa,
             self.last_accel_g,
             self.omega_body.norm(),
             self.destroy_enabled,
+            q_lim,
+            g_lim,
+            qa_lim,
+            rate_lim,
         );
         if dest != DestroyReason::None {
             self.intact = false;
@@ -326,7 +393,8 @@ impl Sim {
         }
 
         let off = corridor_offset(eci_to_ecef(self.r_eci, self.t), self.start_ecef, pad_ecef());
-        if off > corridor_radius_for(self.last_nav.alt, self.scenario) {
+        let pad_overflight = self.scenario.is_orbital() && self.min_range_gc < 25_000.0;
+        if corridor_violated(&self.last_nav, off, self.scenario) && !pad_overflight {
             self.term = TermReason::Corridor;
             return;
         }
@@ -468,6 +536,7 @@ pub fn episode_fitness(sim: &Sim) -> f64 {
     let n = &sim.last_nav;
     let mut f = 0.0;
     f += -0.004 * n.range_h;
+    f += -0.003 * sim.min_range_gc.min(n.range_gc);
     f += -0.08 * n.speed;
     f += -40.0 * n.tilt;
     f += -0.0004 * n.alt;
@@ -511,7 +580,7 @@ pub fn run_episode_with(
     let mut sim = Sim::new_with(seed, destroy, wind_scale, scenario, weather);
     sim.set_weights(weights);
     let mut guard = 0;
-    let cap = if scenario.is_orbital() { 80_000 } else { 40_000 };
+    let cap = if scenario.is_orbital() { 140_000 } else { 40_000 };
     while !sim.terminated() && guard < cap {
         let dt = sim.adaptive_dt();
         sim.step(dt);
@@ -602,5 +671,66 @@ mod tests {
         assert_eq!(sim.scenario, Scenario::Rtls);
         assert!(sim.last_nav.alt < 90_000.0);
         assert!(sim.last_nav.speed < 2_500.0);
+    }
+
+    #[test]
+    fn leo_interface_does_not_corridor_trip() {
+        let mut sim = Sim::new_with(3, true, 0.0, Scenario::LeoDeorbit, Weather::default());
+        let mut guard = 0;
+        while sim.last_nav.alt > 90_000.0 && !sim.terminated() && guard < 80_000 {
+            sim.step(sim.adaptive_dt());
+            guard += 1;
+        }
+        assert_ne!(sim.term, TermReason::Corridor, "term={}", sim.term.as_str());
+        assert!(sim.intact);
+        assert!(sim.v_eci.norm() > 7_000.0);
+        assert!(
+            sim.last_nav.range_gc > 500_000.0,
+            "should still be inbound, gc={}",
+            sim.last_nav.range_gc
+        );
+    }
+
+    #[test]
+    fn leo_nominal_reaches_landing_intact() {
+        // Zero residual, destruction on. The nominal must survive
+        // hypersonic entry and latch a landing burn often enough that
+        // CMA-ES is not staring at a wall of instant-death fitness.
+        let seeds = [3u32, 20, 54, 88];
+        let mut reached = 0u32;
+        for seed in seeds {
+            let mut sim = Sim::new_with(seed, true, 0.0, Scenario::LeoDeorbit, Weather::default());
+            let mut guard = 0;
+            let mut saw_land = false;
+            while !sim.terminated() && guard < 140_000 {
+                sim.step(sim.adaptive_dt());
+                if sim.phase == Phase::Landing || sim.landing_latched {
+                    saw_land = true;
+                    break;
+                }
+                guard += 1;
+            }
+            if saw_land && sim.intact {
+                reached += 1;
+            }
+        }
+        assert!(
+            reached >= 2,
+            "expected ≥2/4 LEO nominals to reach landing intact, got {reached}"
+        );
+    }
+
+    #[test]
+    fn rtls_nominal_still_terminates() {
+        let mut sim = Sim::new(1, true, 1.0);
+        for _ in 0..30_000 {
+            if sim.terminated() {
+                break;
+            }
+            sim.step(sim.adaptive_dt());
+        }
+        assert!(sim.terminated());
+        assert!(sim.t > 5.0);
+        assert!(sim.last_nav.alt < 90_000.0);
     }
 }

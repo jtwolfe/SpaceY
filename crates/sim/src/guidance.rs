@@ -105,6 +105,7 @@ pub struct Nav {
     pub v_enu: Vec3,
     pub pos_enu: Vec3,
     pub range_h: f64,
+    pub range_gc: f64,
     pub up: Vec3,
     pub east: Vec3,
     pub north: Vec3,
@@ -119,20 +120,53 @@ pub struct Nav {
     pub periapsis_alt: f64,
 }
 
-pub fn classify_phase(nav: &Nav, landing_latched: bool) -> Phase {
+pub fn classify_phase(
+    nav: &Nav,
+    landing_latched: bool,
+    deorbit_done: bool,
+    entry_latched: bool,
+    scenario: Scenario,
+) -> Phase {
     if landing_latched {
         return Phase::Landing;
     }
-    if should_start_landing(nav) {
+    if should_start_landing_for(nav, scenario) {
         return Phase::Landing;
     }
-    if nav.speed > 5_500.0 && nav.alt > 110_000.0 && nav.periapsis_alt > 78_000.0 {
+    if !deorbit_done
+        && nav.speed > 5_500.0
+        && nav.alt > 110_000.0
+        && nav.periapsis_alt > DEORBIT_PERI_DONE_M
+    {
         return Phase::Deorbit;
+    }
+    if scenario.is_orbital() {
+        // Pad-ENU range_h collapses near the antipode, so theater is
+        // great-circle only. Do not open Entry at first Q — that captures
+        // 6 000 km uprange.
+        let theater = nav.range_gc < LEO_ENTRY_RANGE_M;
+        if entry_latched && nav.speed > 900.0 && nav.alt > 8_000.0 {
+            return Phase::Entry;
+        }
+        if theater && deorbit_done && nav.speed > 1_600.0 && nav.alt < 120_000.0 {
+            return Phase::Entry;
+        }
+        // Survive a deep skip far from the pad, but ignore the 200 Pa
+        // thermosphere breeze that used to trip the RTLS v_ref catch-all.
+        if nav.q > 25_000.0 && nav.speed > 2_000.0 && nav.alt < 80_000.0 {
+            return Phase::Entry;
+        }
+        if !theater && nav.alt > 35_000.0 {
+            return Phase::Exo;
+        }
+        if nav.alt > 12_000.0 && nav.speed > v_ref(nav.alt) + 30.0 {
+            return Phase::Entry;
+        }
+        return Phase::Glide;
     }
     if nav.alt > 78_000.0 && nav.q < 80.0 {
         return Phase::Exo;
     }
-    // Orbital-energy interface: start the entry burn as soon as Q wakes up.
     if nav.speed > 3_000.0 && nav.q > 40.0 && nav.alt < 105_000.0 {
         return Phase::Entry;
     }
@@ -143,14 +177,29 @@ pub fn classify_phase(nav: &Nav, landing_latched: bool) -> Phase {
 }
 
 pub fn should_start_landing(nav: &Nav) -> bool {
-    if nav.alt > 12_000.0 && nav.range_h > 4_000.0 {
+    should_start_landing_for(nav, Scenario::Rtls)
+}
+
+pub fn should_start_landing_for(nav: &Nav, scenario: Scenario) -> bool {
+    let theater = if scenario.is_orbital() { 20_000.0 } else { 4_000.0 };
+    let range = if scenario.is_orbital() {
+        nav.range_gc.min(nav.range_h)
+    } else {
+        nav.range_h
+    };
+    if nav.alt > 12_000.0 && range > theater {
+        return false;
+    }
+    if scenario.is_orbital() && range > 25_000.0 && nav.engine_alt > 8_000.0 {
         return false;
     }
     let t_sl = MERLIN_THRUST_SL_N * N_ENGINES_LANDING as f64;
     let a_up = (t_sl * 0.85 / nav.mass - G0).max(2.0);
     let v_down = (-nav.v_enu.z).max(0.0);
     let s_burn = v_down * v_down / (2.0 * a_up) + 40.0;
-    nav.engine_alt < s_burn || (nav.engine_alt < 1_800.0 && v_down > 60.0 && nav.range_h < 3_000.0)
+    let close = if scenario.is_orbital() { 20_000.0 } else { 3_000.0 };
+    nav.engine_alt < s_burn
+        || (nav.engine_alt < 2_400.0 && v_down > 40.0 && range < close)
 }
 
 /// Reference airspeed vs altitude after a successful entry (m/s).
@@ -168,10 +217,11 @@ pub fn v_ref(alt: f64) -> f64 {
     }
 }
 
-pub fn nominal_controls(nav: &Nav, phase: Phase) -> (Controls, Vec3) {
+pub fn nominal_controls(nav: &Nav, phase: Phase, scenario: Scenario) -> (Controls, Vec3) {
     // Desired body +X (interstage / "up" of the stage).
     let mut desired_x = nav.up;
     let mut u = Controls::default();
+    let orbital = scenario.is_orbital();
 
     match phase {
         Phase::Deorbit => {
@@ -179,8 +229,15 @@ pub fn nominal_controls(nav: &Nav, phase: Phase) -> (Controls, Vec3) {
                 desired_x = -enu_to_approx(nav.v_enu.normalized(), nav);
             }
             let need = (nav.periapsis_alt - DEORBIT_PERI_TARGET_M).max(0.0);
-            u.n_engines = N_ENGINES_ENTRY;
-            u.throttle = saturate(0.45 + need / 80_000.0);
+            if need < 2_000.0 {
+                u.n_engines = 0;
+                u.throttle = 0.0;
+            } else {
+                // ~50 m/s deorbit — one Merlin, not a 3-engine slam that
+                // overshoots the periapsis target in a single tick.
+                u.n_engines = N_ENGINES_LANDING;
+                u.throttle = saturate(0.55 + need / 120_000.0);
+            }
         }
         Phase::Exo | Phase::Entry => {
             if nav.v_enu.norm() > 10.0 {
@@ -195,7 +252,45 @@ pub fn nominal_controls(nav: &Nav, phase: Phase) -> (Controls, Vec3) {
                 let q_hot = nav.q > 28_000.0 && nav.speed > 480.0;
                 let hypersonic = nav.speed > 1_550.0;
                 let long = closing && overshoot > 6_000.0 && nav.speed > 500.0;
-                if hypersonic || q_hot || long {
+                let reserve = if orbital {
+                    // Do not hold a landing reserve through a 200 kPa pulse.
+                    if (nav.q > 40_000.0 && nav.speed > 1_800.0)
+                        || (nav.range_gc < 30_000.0 && nav.speed > 800.0)
+                    {
+                        800.0
+                    } else if nav.speed > 2_000.0 {
+                        15_000.0
+                    } else if nav.speed > 1_500.0 {
+                        5_500.0
+                    } else {
+                        LEO_LANDING_FUEL_KG
+                    }
+                } else {
+                    0.0
+                };
+                let fuel_ok = nav.fuel > reserve + 200.0;
+                if orbital && fuel_ok && nav.speed > 1_500.0 {
+                    // Q-hold far out; commit to a capture burn inside ~720 km
+                    // so we do not overfly the pad at 7 km/s in thin air.
+                    let q_tgt = 80_000.0;
+                    let hard = nav.range_gc < 720_000.0
+                        || (nav.range_gc < 40_000.0 && nav.speed > 800.0);
+                    if nav.q > 30_000.0 || hard {
+                        u.n_engines = N_ENGINES_ENTRY;
+                        let q_err = ((nav.q - 0.35 * q_tgt) / q_tgt).max(0.0);
+                        let v_need = if hard {
+                            ((nav.speed - 1_550.0) / 2_000.0).clamp(0.0, 1.0)
+                        } else {
+                            0.0
+                        };
+                        let mut thr = saturate(0.40 + 1.10 * q_err + 0.80 * v_need);
+                        let q_g = (nav.q * REF_AREA_M2 * 1.15 / nav.mass) / G0;
+                        if q_g > 12.0 {
+                            thr *= (12.0 / q_g).clamp(0.40, 1.0);
+                        }
+                        u.throttle = saturate(thr);
+                    }
+                } else if fuel_ok && (hypersonic || q_hot || long) {
                     let need = if hypersonic {
                         nav.speed - 1_400.0
                     } else if q_hot {
@@ -204,7 +299,12 @@ pub fn nominal_controls(nav: &Nav, phase: Phase) -> (Controls, Vec3) {
                         overshoot / 12.0
                     };
                     u.n_engines = N_ENGINES_ENTRY;
-                    u.throttle = saturate(0.40 + need / 500.0);
+                    let mut thr = saturate(0.40 + need / 500.0);
+                    let q_g = (nav.q * REF_AREA_M2 * 1.15 / nav.mass) / G0;
+                    if q_g > 6.3 {
+                        thr *= (9.0 / q_g.max(1.0)).clamp(0.40, 1.0);
+                    }
+                    u.throttle = saturate(thr);
                 }
             }
         }
@@ -282,6 +382,7 @@ pub fn attitude_command(
     omega: Vec3,
     desired_x: Vec3,
     phase: Phase,
+    q_dyn: f64,
 ) -> (f64, f64, f64, f64, f64) {
     // Rotate +X toward desired +X. Axis = body_x × desired (world), then body.
     let err = body_x.cross(desired_x.normalized());
@@ -295,9 +396,15 @@ pub fn attitude_command(
     let w_cmd_z = clamp(1.8 * err_body.z, -wmax, wmax);
     let ey = w_cmd_y - omega.y;
     let ez = w_cmd_z - omega.z;
-    let fin_pitch = clamp(ey * 2.2, -FIN_MAX_DEFLECT_RAD, FIN_MAX_DEFLECT_RAD);
-    let fin_yaw = clamp(ez * 2.2, -FIN_MAX_DEFLECT_RAD, FIN_MAX_DEFLECT_RAD);
-    let fin_roll = clamp(-omega.x * 2.0, -FIN_MAX_DEFLECT_RAD, FIN_MAX_DEFLECT_RAD);
+    // Fin moment ~ q S Cl δ. Hold deflection down as Q rises or the
+    // loop rate-saturates (structural spin at ~35 km / 100 kPa).
+    let qn = (1.0 + q_dyn / 2_500.0).max(1.0);
+    let fin_lim = FIN_MAX_DEFLECT_RAD / qn.max(1.0);
+    // RCS owns the rarefied band; fins at 1–8 kPa with a 70 ms step PIO.
+    let fin_enable = if q_dyn < 4_000.0 { 0.0 } else { 1.0 };
+    let fin_pitch = clamp(ey * 2.2 / qn, -fin_lim, fin_lim) * fin_enable;
+    let fin_yaw = clamp(ez * 2.2 / qn, -fin_lim, fin_lim) * fin_enable;
+    let fin_roll = clamp(-omega.x * 1.4 / qn, -fin_lim, fin_lim) * fin_enable;
     let gmax = if phase == Phase::Landing {
         GIMBAL_MAX_RAD
     } else {
@@ -390,12 +497,28 @@ pub fn corridor_radius_for(alt: f64, scenario: Scenario) -> f64 {
     match scenario {
         Scenario::Rtls => 350.0 + 18_000.0 * saturate(alt / 80_000.0),
         Scenario::LeoDeorbit => {
-            if alt > 100_000.0 {
-                // Pad-ENU crossrange is meaningless on a half-rev coast.
+            if alt > 65_000.0 {
                 f64::INFINITY
             } else {
-                1_200.0 + 55_000.0 * saturate(alt / 100_000.0)
+                LEO_CORRIDOR_PAD_M + 48_000.0 * saturate(alt / 65_000.0)
             }
+        }
+    }
+}
+
+/// LEO pad-ENU crossrange is meaningless on a half-rev coast — at the
+/// 100 km interface the pad is still ~6 000 km away and a 56 km corridor
+/// instantly kills every episode. Enforce a pad-centered cone only inside
+/// the landing theater.
+pub fn corridor_violated(nav: &Nav, offset: f64, scenario: Scenario) -> bool {
+    match scenario {
+        Scenario::Rtls => offset > corridor_radius_for(nav.alt, scenario),
+        Scenario::LeoDeorbit => {
+            if nav.range_gc > LEO_CORRIDOR_THEATER_M {
+                return false;
+            }
+            let cone = LEO_CORRIDOR_PAD_M + LEO_CORRIDOR_SLOPE * nav.alt.max(0.0);
+            nav.range_gc > cone || nav.range_h > cone
         }
     }
 }
@@ -494,6 +617,7 @@ pub fn nav_from(
         v_enu,
         pos_enu,
         range_h: (pos_enu.x * pos_enu.x + pos_enu.y * pos_enu.y).sqrt(),
+        range_gc: crate::earth::great_circle_m(r_ecef, pad),
         up,
         east,
         north,
