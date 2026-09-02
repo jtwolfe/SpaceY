@@ -142,12 +142,17 @@ impl Engine {
             return;
         }
         // Orbital coast at 250× needs more than 4 s of sim per frame.
+        // Always take a full adaptive_dt — trimming the last slice to
+        // `remain` desynchronizes the 2800 s LEO coast from native
+        // (seed 88 landed at 20 m native, missed by 550 m in the
+        // browser at 250×).
         let cap = if self.scenario.is_orbital() { 12.0 } else { 4.0 };
-        let mut remain = (dt * self.time_warp).clamp(0.0, cap);
-        while remain > 1e-4 && !self.display.terminated() {
-            let h = self.display.adaptive_dt().min(remain);
+        let budget = (dt * self.time_warp).clamp(0.0, cap);
+        let mut used = 0.0;
+        while used < budget && !self.display.terminated() {
+            let h = self.display.adaptive_dt();
             self.display.step(h);
-            remain -= h;
+            used += h;
         }
     }
 

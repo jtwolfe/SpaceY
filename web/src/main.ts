@@ -105,8 +105,17 @@ async function main() {
 
   document.querySelector("#btn-train")!.addEventListener("click", () => engine.start_training());
   document.querySelector("#btn-pause")!.addEventListener("click", () => engine.pause_training());
+  const params = new URLSearchParams(location.search);
+  const episodeSeed = () => {
+    const q = params.get("seed");
+    if (q != null && q !== "" && Number.isFinite(Number(q))) {
+      return Number(q) >>> 0;
+    }
+    return (Math.random() * 1e9) >>> 0;
+  };
+
   document.querySelector("#btn-reset")!.addEventListener("click", () => {
-    engine.reset((Math.random() * 1e9) >>> 0);
+    engine.reset(episodeSeed());
     scene?.resetTrail();
   });
   document.querySelector("#tog-destroy")!.addEventListener("change", (e) => {
@@ -131,7 +140,7 @@ async function main() {
       const id = Number(b.dataset.scenario);
       engine.set_scenario(id);
       setScenarioUi(id);
-      engine.reset((Math.random() * 1e9) >>> 0);
+      engine.reset(episodeSeed());
       scene?.resetTrail();
     });
   });
@@ -173,6 +182,28 @@ async function main() {
     paint(snap, train);
     requestAnimationFrame(loop);
   };
+  const windQ = params.get("wind");
+  if (windQ != null && Number.isFinite(Number(windQ))) {
+    const v = Number(windQ);
+    engine.set_wind_scale(v);
+    const slider = document.querySelector<HTMLInputElement>("#rng-wind");
+    if (slider) slider.value = String(v);
+    const label = document.querySelector("#wind-val");
+    if (label) label.textContent = `${v.toFixed(1)}×`;
+  }
+
+  if (params.get("scenario") === "leo") {
+    engine.set_scenario(1);
+    setScenarioUi(1);
+    engine.reset(episodeSeed());
+    scene?.resetTrail();
+    snap = JSON.parse(engine.snapshot_json()) as Snapshot;
+  } else if (params.get("seed") != null) {
+    engine.reset(episodeSeed());
+    scene?.resetTrail();
+    snap = JSON.parse(engine.snapshot_json()) as Snapshot;
+  }
+
   paint(snap, JSON.parse(engine.train_json()));
   requestAnimationFrame(loop);
 }
