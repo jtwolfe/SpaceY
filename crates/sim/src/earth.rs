@@ -95,6 +95,33 @@ pub fn enu_to_ecef_vec(v: Vec3, lat: f64, lon: f64) -> Vec3 {
     e * v.x + n * v.y + u * v.z
 }
 
+/// Great-circle distance between two ECEF (or ECI-at-t0) position vectors.
+pub fn great_circle_m(a: Vec3, b: Vec3) -> f64 {
+    EARTH_RADIUS_EQ * crate::math::angle_between(a, b)
+}
+
+/// Keplerian periapsis radius from an ECI (or inertial) state.
+/// Hyperbolic / near-parabolic trajectories return `f64::INFINITY`.
+pub fn periapsis_radius(r: Vec3, v: Vec3) -> f64 {
+    let r1 = r.norm();
+    if r1 < 1.0 {
+        return 0.0;
+    }
+    let mu = EARTH_MU;
+    let eps = 0.5 * v.norm_squared() - mu / r1;
+    let h = r.cross(v).norm();
+    if eps >= 0.0 {
+        return f64::INFINITY;
+    }
+    let a = -mu / (2.0 * eps);
+    if !a.is_finite() || a <= 0.0 {
+        return f64::INFINITY;
+    }
+    let arg = 1.0 + 2.0 * eps * h * h / (mu * mu);
+    let e = arg.max(0.0).sqrt();
+    a * (1.0 - e)
+}
+
 /// J2 gravity in a frame whose +Z is Earth's rotation axis (ECI or ECEF).
 pub fn gravity_j2(r: Vec3) -> Vec3 {
     let r2 = r.norm_squared();
@@ -132,6 +159,7 @@ pub fn tilt_from_vertical(body_x_ecef: Vec3, up: Vec3) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::{EARTH_MU, EARTH_RADIUS_EQ};
 
     #[test]
     fn geodetic_roundtrip_pad() {
@@ -156,5 +184,14 @@ mod tests {
         let a = gravity_j2(r);
         assert!(a.dot(r) < 0.0);
         assert!((a.norm() - 9.8).abs() < 0.15);
+    }
+
+    #[test]
+    fn circular_periapsis_is_radius() {
+        let r = Vec3::new(EARTH_RADIUS_EQ + 220_000.0, 0.0, 0.0);
+        let v_c = (EARTH_MU / r.norm()).sqrt();
+        let v = Vec3::new(0.0, v_c, 0.0);
+        let rp = periapsis_radius(r, v);
+        assert!((rp - r.norm()).abs() < 2_000.0, "rp={rp} r={}", r.norm());
     }
 }

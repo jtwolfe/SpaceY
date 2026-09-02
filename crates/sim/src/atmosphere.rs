@@ -35,6 +35,15 @@ fn geopotential(h_geom: f64) -> f64 {
     R0 * h_geom / (R0 + h_geom)
 }
 
+/// US76 lookup with a uniform density/pressure scale (synthetic weather day).
+pub fn lookup_scaled(altitude_m: f64, density_scale: f64) -> Air {
+    let mut air = lookup(altitude_m);
+    let s = density_scale.clamp(0.2, 2.5);
+    air.density *= s;
+    air.pressure_pa *= s;
+    air
+}
+
 pub fn lookup(altitude_m: f64) -> Air {
     let h = altitude_m.max(-200.0);
     if h < 0.0 {
@@ -109,5 +118,7 @@ mod tests {
         assert!(mid.density > 0.003 && mid.density < 0.005);
         let vac = lookup(120_000.0);
         assert!(vac.density < 1e-7);
+        let scaled = lookup_scaled(0.0, 1.10);
+        assert!((scaled.density - lookup(0.0).density * 1.10).abs() < 1e-6);
     }
 }

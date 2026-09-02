@@ -67,7 +67,7 @@ html, body, #app {
 .hud {
   position: absolute;
   top: 72px;
-  width: 250px;
+  width: 268px;
   padding: 14px 16px 16px;
   background: var(--panel);
   border: 1px solid var(--line);

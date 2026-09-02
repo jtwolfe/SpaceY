@@ -77,6 +77,15 @@ pub const AOA_DESTROY_RAD: f64 = 42.0 * std::f64::consts::PI / 180.0;
 pub const Q_FOR_AOA_DESTROY_PA: f64 = 12_000.0;
 pub const RATE_DESTROY_RAD_S: f64 = 3.5;
 
+/// Orbital-energy scenario (LEO-class start). First stages do not actually
+/// reach this energy; the same F9-class vehicle is flown from a circular
+/// ~220 km / ~7.8 km/s inertial state to exercise deorbit → entry → landing.
+pub const ORBITAL_ALT_M: f64 = 220_000.0;
+pub const ORBITAL_START_FUEL_KG: f64 = 55_000.0;
+pub const DEORBIT_PERI_TARGET_M: f64 = 72_000.0;
+pub const RTLS_TIMEOUT_S: f64 = 420.0;
+pub const LEO_TIMEOUT_S: f64 = 2_800.0;
+
 /// Landing success box (engine-bell / pad frame).
 pub const SUCCESS_ENGINE_ALT_M: f64 = 10.0;
 pub const SUCCESS_SPEED_MPS: f64 = 6.0;

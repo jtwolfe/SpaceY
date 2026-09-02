@@ -5,7 +5,9 @@
 //! browser: one generation is a handful of 6DOF rollouts, no backprop.
 
 use crate::guidance::{TermReason, N_WEIGHTS};
-use crate::sim::run_episode;
+use crate::scenario::Scenario;
+use crate::sim::run_episode_with;
+use crate::wind::Weather;
 use rand::rngs::SmallRng;
 use rand::Rng;
 use rand::SeedableRng;
@@ -42,6 +44,8 @@ pub struct Trainer {
     pub episodes: u32,
     pub destroy: bool,
     pub wind_scale: f64,
+    pub scenario: Scenario,
+    pub weather: Weather,
     pub scenario_seed: u32,
     mean: Vec<f64>,
     sigma: f64,
@@ -84,6 +88,8 @@ impl Trainer {
             episodes: 0,
             destroy,
             wind_scale,
+            scenario: Scenario::Rtls,
+            weather: Weather::default(),
             scenario_seed: seed,
             mean: vec![0.0; n],
             sigma: 0.22,
@@ -163,11 +169,13 @@ impl Trainer {
                 .wrapping_add(self.generation * 17)
                 .wrapping_add(self.eval_index as u32 * 31)
                 .wrapping_add(self.rng.gen::<u32>() % 8);
-            let (fit, term, _) = run_episode(
+            let (fit, term, _) = run_episode_with(
                 &self.pending[self.eval_index],
                 seed,
                 self.destroy,
                 self.wind_scale,
+                self.scenario,
+                self.weather,
             );
             self.pending_f[self.eval_index] = Some((fit, term));
             self.eval_index += 1;

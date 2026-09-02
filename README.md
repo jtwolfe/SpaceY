@@ -2,6 +2,13 @@
 
 Browser simulation of a **Falcon 9-class first stage** coming in from near-vacuum through a grid-fin atmospheric glide to a propulsive landing — and an in-browser **CMA-ES** trainer for a residual control policy.
 
+Two selectable scenarios:
+
+| Scenario | Start | Notes |
+|----------|--------|--------|
+| **RTLS** (default) | ~80 km, ~2.0–2.1 km/s Earth-relative | First-stage reentry after boostback. This is v1. |
+| **LEO deorbit** | ~220 km, **~7.8 km/s inertial** (~7.3–7.5 km/s ground), near-vacuum | Same vehicle from circular LEO-class energy: retrograde deorbit, hypersonic entry, grid-fin glide, propulsive landing. First stages do not actually reach orbit; this is the energy-class gap vs RTLS. |
+
 Physics and training run entirely in **Rust compiled to WASM**. The scene is **TypeScript + Three.js**. This is a normal `cargo` + `wasm-bindgen` + `vite` toolchain.
 
 **Grok Build, the `grok` CLI, grok TUI, and any Grok Build / Grok coding-agent workflow are not part of this project.**
@@ -24,8 +31,10 @@ Other scripts:
 
 | Command        | What it does                                      |
 |----------------|---------------------------------------------------|
-| `npm test`     | Native Rust unit tests (atmosphere, frames, episode termination) |
+| `npm test`     | Native Rust unit tests (atmosphere, frames, episode termination, LEO start) |
 | `npm run build`| Production static build in `web/dist`             |
+
+CI on `main` and pull requests runs `cargo test -p spacey_sim` and a `wasm32-unknown-unknown` release build (fail closed if the crate does not compile).
 
 ## What the sim models
 
@@ -33,7 +42,7 @@ Other scripts:
 - **US Standard Atmosphere 1976** (NASA-TM-X-74335 / NOAA-S/T 76-1562) from sea level through 86 km, exponential tail above.
 - **Aerodynamics**: Mach-dependent drag, AoA lift, grid fins as control surfaces, a combined CP that weathercocks tail-first. Coherent and dimensioned — not a NASA aero table.
 - **Propulsion**: up to three Merlin-class engines, throttle 40–100%, gimbal, Isp mix of SL/vac, fuel-mass depletion.
-- **Wind**: layered Florida-east-coast caricature plus Ornstein–Uhlenbeck gusts (not a live weather product).
+- **Wind / weather**: layered Florida-east-coast caricature plus Ornstein–Uhlenbeck gusts. Optional **storm** (stronger surface flow, larger gusts, +10% density) and **shear** (amplified layer-to-layer speed/direction contrast, slightly thinner mid-atmosphere). Synthetic only — not live METAR.
 - **Destruction** (default **on**): max-Q, over-G, q-alpha, excessive AoA, spin, hard impact. Toggle in the UI.
 - **Fuel-to-land bound**: conservative analytic check once in the lower atmosphere / landing burn.
 - **Corridor**: ground-track crossrange from the start→pad line; tightens with altitude.
@@ -56,7 +65,9 @@ Cited from SpaceX Falcon 9 user's guide figures, FAA/environmental filings, and 
 | Grid fins | 4 × ~1.8 m² | Titanium Block 5; photos / patents |
 | Pad | LZ-1, 28.4856°N 80.5444°W | Public coordinates |
 
-Start state is an **approximate first-stage reentry**: ~80 km, ~2.0–2.1 km/s Earth-relative, westbound toward LZ-1. First stages do not reach orbital velocity; this is reentry-class, not a 7.8 km/s LEO deorbit.
+**RTLS** start is an **approximate first-stage reentry**: ~80 km, ~2.0–2.1 km/s Earth-relative, westbound toward LZ-1.
+
+**LEO** start is a circular ~220 km / ~7.8 km/s inertial state on a plane that overflies LZ-1 after a retrograde deorbit and a half-rev coast. Density at that altitude is thermospheric (~10⁻¹⁰ kg/m³). Use 100–250× time warp for the exoatmospheric coast. The same Merlin-class stack then flies hypersonic entry → grid fins → landing burn. Surviving 7.8 km/s on a first-stage airframe is the training problem — not a claim that Falcon 9 stages do this.
 
 ## How training works
 
@@ -80,7 +91,9 @@ Bevy-on-WASM was considered and skipped: longer compile, heavier download, no ad
 ## Controls
 
 - **Start training / Pause / Reset episode**
+- **Scenario**: RTLS (default) or LEO deorbit
 - **Destruction** toggle (default on)
+- **Storm / shear** weather toggles (on top of the wind scale)
 - **Wind** scale 0–2×
-- **Cameras**: chase, pad, orbital overview
-- **Time warp**: 1 / 5 / 25 / 100× (useful in the exoatmospheric coast)
+- **Cameras**: chase, pad, orbital overview (orbital camera frames both pad and vehicle at Earth scale)
+- **Time warp**: 1 / 5 / 25 / 100 / 250× (needed for the LEO coast)

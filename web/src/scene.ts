@@ -72,7 +72,7 @@ function makeStars(): THREE.Points {
 export class SceneApp {
   readonly renderer: THREE.WebGLRenderer;
   readonly scene = new THREE.Scene();
-  readonly camera = new THREE.PerspectiveCamera(55, 1, 20, 8e7);
+  readonly camera = new THREE.PerspectiveCamera(55, 1, 20, 1.2e8);
   camMode: CamMode = "chase";
 
   private earth: THREE.Mesh;
@@ -274,7 +274,8 @@ export class SceneApp {
     this.rocket.quaternion.copy(mapped.clone().multiply(qEcef).multiply(bodyToThree));
     this.marker.position.copy(pos);
     this.marker.visible = this.camMode !== "chase";
-    this.marker.scale.setScalar(this.camMode === "orbit" ? 12_000 : 400);
+    const orbitMark = Math.max(12_000, Math.min(80_000, s.range_h * 0.012));
+    this.marker.scale.setScalar(this.camMode === "orbit" ? orbitMark : 400);
 
     const [padx, pady, padz] = s.pad_ecef;
     this.pad.position.set(padx, padz, -pady);
@@ -343,7 +344,8 @@ export class SceneApp {
   private updateCamera(s: Snapshot, pos: THREE.Vector3, up: THREE.Vector3) {
     const pad = this.pad.position;
     if (this.camMode === "chase") {
-      const back = new THREE.Vector3(0, -1, 0).applyQuaternion(this.rocket.quaternion).multiplyScalar(110);
+      const pull = 110 + Math.min(220, s.alt / 2_000);
+      const back = new THREE.Vector3(0, -1, 0).applyQuaternion(this.rocket.quaternion).multiplyScalar(pull);
       const side = new THREE.Vector3(1, 0.45, 0.35).applyQuaternion(this.rocket.quaternion).multiplyScalar(36);
       const camPos = pos.clone().add(back).add(side);
       if (!this.camReady) this.camera.position.copy(camPos);
@@ -351,25 +353,34 @@ export class SceneApp {
       this.camera.up.copy(up);
       this.camera.lookAt(pos);
     } else if (this.camMode === "pad") {
-      const radial = up.clone().multiplyScalar(220);
-      const east = new THREE.Vector3(0, 1, 0).cross(up).normalize().multiplyScalar(260);
+      const radial = up.clone().multiplyScalar(s.range_h > 200_000 ? 1_800 : 220);
+      const east = new THREE.Vector3(0, 1, 0).cross(up).normalize().multiplyScalar(s.range_h > 200_000 ? 2_400 : 260);
       this.camera.position.copy(pad).add(radial).add(east);
       this.camera.up.copy(up);
-      this.camera.lookAt(s.range_h < 80_000 ? pos : pad.clone().add(up.clone().multiplyScalar(40_000)));
+      if (s.range_h < 250_000) {
+        this.camera.lookAt(pos);
+      } else {
+        this.camera.lookAt(pad.clone().add(up.clone().multiplyScalar(80_000)));
+      }
     } else {
-      const n = pad.clone().normalize();
-      const tangent = new THREE.Vector3(0, 1, 0).cross(n);
-      if (tangent.lengthSq() < 1e-6) tangent.set(1, 0, 0);
-      tangent.normalize();
-      this.camera.position.copy(
-        n.clone().multiplyScalar(EARTH_R + 2_800_000).add(tangent.multiplyScalar(900_000)),
-      );
-      this.camera.up.copy(n);
+      const padN = pad.clone().normalize();
+      const vehN = pos.clone().normalize();
+      let along = padN.clone().add(vehN);
+      if (along.lengthSq() < 0.05) {
+        along = new THREE.Vector3(0, 1, 0).cross(padN);
+      }
+      along.normalize();
+      let side = padN.clone().cross(vehN);
+      if (side.lengthSq() < 1e-6) side = new THREE.Vector3(0, 1, 0).cross(padN);
+      side.normalize();
+      const view = along.multiplyScalar(0.28).add(side.multiplyScalar(0.96)).normalize();
+      this.camera.position.copy(view.multiplyScalar(EARTH_R + 5_200_000));
+      this.camera.up.copy(padN);
       this.camera.lookAt(new THREE.Vector3(0, 0, 0));
     }
     this.camReady = true;
     this.camera.near = this.camMode === "orbit" ? 2000 : 2;
-    this.camera.far = 8e7;
+    this.camera.far = 1.2e8;
     this.camera.updateProjectionMatrix();
   }
 

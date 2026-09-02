@@ -3,10 +3,12 @@
 use crate::constants::*;
 use crate::earth::{ecef_to_enu, enu_basis, pad_ecef, pad_geodetic};
 use crate::math::{clamp, saturate, Vec3};
+use crate::scenario::Scenario;
 use crate::vehicle::DestroyReason;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
+    Deorbit,
     Exo,
     Entry,
     Glide,
@@ -16,6 +18,7 @@ pub enum Phase {
 impl Phase {
     pub fn as_str(self) -> &'static str {
         match self {
+            Phase::Deorbit => "DEORBIT",
             Phase::Exo => "EXO",
             Phase::Entry => "ENTRY",
             Phase::Glide => "GLIDE",
@@ -113,6 +116,7 @@ pub struct Nav {
     pub fuel: f64,
     pub mass: f64,
     pub engine_alt: f64,
+    pub periapsis_alt: f64,
 }
 
 pub fn classify_phase(nav: &Nav, landing_latched: bool) -> Phase {
@@ -122,8 +126,15 @@ pub fn classify_phase(nav: &Nav, landing_latched: bool) -> Phase {
     if should_start_landing(nav) {
         return Phase::Landing;
     }
+    if nav.speed > 5_500.0 && nav.alt > 110_000.0 && nav.periapsis_alt > 78_000.0 {
+        return Phase::Deorbit;
+    }
     if nav.alt > 78_000.0 && nav.q < 80.0 {
         return Phase::Exo;
+    }
+    // Orbital-energy interface: start the entry burn as soon as Q wakes up.
+    if nav.speed > 3_000.0 && nav.q > 40.0 && nav.alt < 105_000.0 {
+        return Phase::Entry;
     }
     if nav.alt > 12_000.0 && nav.speed > v_ref(nav.alt) + 30.0 {
         return Phase::Entry;
@@ -163,6 +174,14 @@ pub fn nominal_controls(nav: &Nav, phase: Phase) -> (Controls, Vec3) {
     let mut u = Controls::default();
 
     match phase {
+        Phase::Deorbit => {
+            if nav.v_enu.norm() > 10.0 {
+                desired_x = -enu_to_approx(nav.v_enu.normalized(), nav);
+            }
+            let need = (nav.periapsis_alt - DEORBIT_PERI_TARGET_M).max(0.0);
+            u.n_engines = N_ENGINES_ENTRY;
+            u.throttle = saturate(0.45 + need / 80_000.0);
+        }
         Phase::Exo | Phase::Entry => {
             if nav.v_enu.norm() > 10.0 {
                 desired_x = -enu_to_approx(nav.v_enu.normalized(), nav);
@@ -294,7 +313,7 @@ pub fn attitude_command(
 pub fn apply_residual(mut u: Controls, r: &[f64; N_ACTIONS], phase: Phase) -> Controls {
     let t_scale = match phase {
         Phase::Landing => 0.25,
-        Phase::Entry => 0.20,
+        Phase::Entry | Phase::Deorbit => 0.20,
         _ => 0.10,
     };
     u.throttle = saturate(u.throttle + r[0] * t_scale);
@@ -350,6 +369,7 @@ pub fn features(nav: &Nav, phase: Phase, pred_overshoot: f64) -> [f64; N_FEATURE
         pred_overshoot / 15_000.0,
         nav.mach / 8.0,
         match phase {
+            Phase::Deorbit => -0.15,
             Phase::Exo => 0.0,
             Phase::Entry => 0.33,
             Phase::Glide => 0.66,
@@ -363,7 +383,21 @@ pub fn features(nav: &Nav, phase: Phase, pred_overshoot: f64) -> [f64; N_FEATURE
 /// Measured as **ground-track crossrange** (see `corridor_offset`), not 3D
 /// distance to the start→pad chord — a ballistic arc sits far above that chord.
 pub fn corridor_radius(alt: f64) -> f64 {
-    350.0 + 18_000.0 * saturate(alt / 80_000.0)
+    corridor_radius_for(alt, Scenario::Rtls)
+}
+
+pub fn corridor_radius_for(alt: f64, scenario: Scenario) -> f64 {
+    match scenario {
+        Scenario::Rtls => 350.0 + 18_000.0 * saturate(alt / 80_000.0),
+        Scenario::LeoDeorbit => {
+            if alt > 100_000.0 {
+                // Pad-ENU crossrange is meaningless on a half-rev coast.
+                f64::INFINITY
+            } else {
+                1_200.0 + 55_000.0 * saturate(alt / 100_000.0)
+            }
+        }
+    }
 }
 
 pub fn corridor_offset(r_ecef: Vec3, start_ecef: Vec3, pad: Vec3) -> f64 {
@@ -382,7 +416,7 @@ pub fn corridor_offset(r_ecef: Vec3, start_ecef: Vec3, pad: Vec3) -> f64 {
 /// Conservative propulsive reachability. Aero braking is credited only while
 /// dynamic pressure can still do useful work.
 pub fn fuel_infeasible(nav: &Nav, phase: Phase) -> bool {
-    if phase == Phase::Exo || phase == Phase::Entry {
+    if phase == Phase::Deorbit || phase == Phase::Exo || phase == Phase::Entry {
         return false;
     }
     if nav.fuel < 80.0 && nav.engine_alt > 80.0 && nav.speed > 40.0 {
@@ -471,8 +505,10 @@ pub fn nav_from(
         fuel,
         mass,
         engine_alt,
+        periapsis_alt: 0.0,
     }
 }
+
 
 pub fn destroy_term(reason: DestroyReason) -> TermReason {
     if reason == DestroyReason::None {
