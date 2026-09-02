@@ -58,7 +58,7 @@ Cited from SpaceX Falcon 9 user's guide figures, FAA/environmental filings, and 
 | Stage + interstage length | 47 m | Full stack ~70 m |
 | Stage-1 dry mass | 25 600 kg | Published estimates ~22–27 t |
 | Ascent propellant capacity | 395 700 kg | LOX + RP-1; **not** the start load |
-| Scenario start fuel | 40 000 kg | After ascent + boostback (RTLS-class remainder) |
+| Scenario start fuel | 40 000 kg RTLS / 65 000 kg LEO | After ascent + boostback; LEO carries more for the hypersonic capture burn |
 | Merlin 1D SL / vac | 845 / 914 kN | Block 5 public figures |
 | Merlin 1D Isp SL / vac | 282 / 311 s | Same |
 | Landing / entry engines | 1 or 3 | Center or cluster |
@@ -68,6 +68,8 @@ Cited from SpaceX Falcon 9 user's guide figures, FAA/environmental filings, and 
 **RTLS** start is an **approximate first-stage reentry**: ~80 km, ~2.0–2.1 km/s Earth-relative, westbound toward LZ-1.
 
 **LEO** start is a circular ~220 km / ~7.8 km/s inertial state on a plane that overflies LZ-1 after a retrograde deorbit and a half-rev coast. Density at that altitude is thermospheric (~10⁻¹⁰ kg/m³). Use 100–250× time warp for the exoatmospheric coast. The same Merlin-class stack then flies hypersonic entry → grid fins → landing burn. Surviving 7.8 km/s on a first-stage airframe is the training problem — not a claim that Falcon 9 stages do this.
+
+The LEO **nominal** (zero residual, destruction on) is built to reach a landing-burn attempt a meaningful fraction of the time: vacuum RCS holds tail-first through coast, the pad-ENU corridor is ignored until the landing theater, deorbit is a single-engine ~50 m/s burn that latches, and the entry law is a Q-hold plus a capture burn inside ~720 km so CMA-ES does not only see instant-death fitness. LEO structural limits are higher than RTLS (Q 250 kPa / 18 g) — still fatal for an unburned 7.8 km/s dive, not a destruction-off cheat.
 
 ## How training works
 

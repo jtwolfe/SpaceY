@@ -174,27 +174,67 @@ pub enum DestroyReason {
 }
 
 pub fn check_destruction(q: f64, aoa: f64, accel_g: f64, rate: f64, enabled: bool) -> DestroyReason {
+    check_destruction_limits(
+        q,
+        aoa,
+        accel_g,
+        rate,
+        enabled,
+        Q_DESTROY_PA,
+        G_DESTROY,
+        Q_ALPHA_DESTROY,
+        RATE_DESTROY_RAD_S,
+    )
+}
+
+pub fn check_destruction_limits(
+    q: f64,
+    aoa: f64,
+    accel_g: f64,
+    rate: f64,
+    enabled: bool,
+    q_lim: f64,
+    g_lim: f64,
+    q_alpha_lim: f64,
+    rate_lim: f64,
+) -> DestroyReason {
     if !enabled {
         return DestroyReason::None;
     }
-    if q > Q_DESTROY_PA {
+    if q > q_lim {
         return DestroyReason::MaxQ;
     }
-    if accel_g > G_DESTROY {
+    if accel_g > g_lim {
         return DestroyReason::OverG;
     }
     let q_kpa = q / 1000.0;
     let aoa_deg = aoa.abs() * 180.0 / std::f64::consts::PI;
-    if q_kpa * aoa_deg > Q_ALPHA_DESTROY {
+    if q_kpa * aoa_deg > q_alpha_lim {
         return DestroyReason::QAlpha;
     }
     if aoa.abs() > AOA_DESTROY_RAD && q > Q_FOR_AOA_DESTROY_PA {
         return DestroyReason::HighAoA;
     }
-    if rate > RATE_DESTROY_RAD_S {
+    if rate > rate_lim {
         return DestroyReason::Spin;
     }
     DestroyReason::None
+}
+
+/// Cold-gas RCS moment in the body frame. Authority fades as dynamic
+/// pressure comes up so grid fins own the atmosphere.
+pub fn rcs_moment(omega: Vec3, err_body: Vec3, inertia: Vec3, q: f64) -> Vec3 {
+    let blend = (1.0 - q / RCS_Q_HANDOFF_PA).clamp(0.0, 1.0);
+    if blend < 1e-4 {
+        return Vec3::ZERO;
+    }
+    let wmax = 0.14;
+    let w_cmd_y = crate::math::clamp(2.2 * err_body.y, -wmax, wmax);
+    let w_cmd_z = crate::math::clamp(2.2 * err_body.z, -wmax, wmax);
+    let ay = crate::math::clamp((w_cmd_y - omega.y) * 3.0, -RCS_ANG_ACCEL, RCS_ANG_ACCEL);
+    let az = crate::math::clamp((w_cmd_z - omega.z) * 3.0, -RCS_ANG_ACCEL, RCS_ANG_ACCEL);
+    let ax = crate::math::clamp(-omega.x * 2.5, -RCS_ANG_ACCEL, RCS_ANG_ACCEL);
+    Vec3::new(inertia.x * ax, inertia.y * ay, inertia.z * az) * blend
 }
 
 impl DestroyReason {

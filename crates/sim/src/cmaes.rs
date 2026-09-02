@@ -380,3 +380,29 @@ extern "C" {
     #[wasm_bindgen(js_namespace = Date, js_name = now)]
     fn now_via_js() -> f64;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scenario::Scenario;
+
+    #[test]
+    fn leo_generation_advances() {
+        let mut t = Trainer::new(11, true, 0.0);
+        t.scenario = Scenario::LeoDeorbit;
+        t.start();
+        let mut ticks = 0;
+        while t.generation < 1 && ticks < 32 {
+            t.tick(120_000.0);
+            ticks += 1;
+        }
+        assert!(
+            t.generation >= 1,
+            "LEO CMA-ES should finish a generation, gen={} eps={}",
+            t.generation,
+            t.episodes
+        );
+        assert!(t.episodes >= LAMBDA as u32);
+        assert!(t.info().best_ever.is_finite());
+    }
+}

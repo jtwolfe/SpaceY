@@ -123,9 +123,12 @@ fn spawn_leo(rng: &mut impl Rng) -> Spawn {
     // Half-period of a 220 km circular orbit is ~44 min; Earth rotates ~11°.
     let coast = 2_520.0 + 30.0 * (rng.gen::<f64>() - 0.5);
     let lead = EARTH_OMEGA * coast;
+    // Periapsis is west of the pad (eastbound capture) so the vehicle is
+    // still inbound when the entry burn makes the orbit Earth-intersecting.
+    let uprange_lon = LEO_PERI_UPRANGE_M / (EARTH_RADIUS_EQ * pad.lat.cos().max(0.3));
     let peri_geo = Geodetic {
         lat: pad.lat + 0.002 * (rng.gen::<f64>() - 0.5),
-        lon: pad.lon - lead + 0.004 * (rng.gen::<f64>() - 0.5),
+        lon: pad.lon - lead - uprange_lon + 0.004 * (rng.gen::<f64>() - 0.5),
         alt: DEORBIT_PERI_TARGET_M,
     };
     let r_peri = geodetic_to_ecef(peri_geo);

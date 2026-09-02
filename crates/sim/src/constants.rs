@@ -81,10 +81,39 @@ pub const RATE_DESTROY_RAD_S: f64 = 3.5;
 /// reach this energy; the same F9-class vehicle is flown from a circular
 /// ~220 km / ~7.8 km/s inertial state to exercise deorbit → entry → landing.
 pub const ORBITAL_ALT_M: f64 = 220_000.0;
-pub const ORBITAL_START_FUEL_KG: f64 = 55_000.0;
-pub const DEORBIT_PERI_TARGET_M: f64 = 72_000.0;
+pub const ORBITAL_START_FUEL_KG: f64 = 65_000.0;
+/// Periapsis after the retrograde deorbit. High enough to avoid a 20 g
+/// brick, low enough that a 3-engine entry burn can capture.
+pub const DEORBIT_PERI_TARGET_M: f64 = 80_000.0;
+/// Once osculating periapsis is at or below this, never re-open the
+/// deorbit burn — J2 makes the Keplerian periapsis wander a few km.
+pub const DEORBIT_PERI_DONE_M: f64 = 83_000.0;
+/// Place periapsis *uprange* (west) of LZ-1. The vehicle is eastbound, so
+/// the capture burn and the fall after periapsis happen on the way to the
+/// pad instead of over it (which would overshoot by hundreds of km).
+pub const LEO_PERI_UPRANGE_M: f64 = 550_000.0;
+/// Open the entry *phase* once the pad is this close. The burn itself is
+/// gated by a speed-vs-range schedule so we do not drop short.
+pub const LEO_ENTRY_RANGE_M: f64 = 900_000.0;
+/// RP-1 reserved for the landing burn after the entry burn.
+pub const LEO_LANDING_FUEL_KG: f64 = 10_000.0;
+/// Pad-ENU corridor is meaningless until the vehicle is in this theater.
+pub const LEO_CORRIDOR_THEATER_M: f64 = 700_000.0;
+pub const LEO_CORRIDOR_PAD_M: f64 = 6_000.0;
+pub const LEO_CORRIDOR_SLOPE: f64 = 28.0;
+/// Cold-gas RCS angular acceleration (vacuum attitude hold). F9-class
+/// nitrogen thrusters; not deducted from RP-1.
+pub const RCS_ANG_ACCEL: f64 = 0.12;
+pub const RCS_Q_HANDOFF_PA: f64 = 12_000.0;
+/// LEO-class airframe limits. Ascent max-Q is ~30 kPa; a 7.8 km/s entry
+/// with a real entry burn still peaks well above that. These trip a skip
+/// or a tumble, not a clean tail-first capture.
+pub const LEO_Q_DESTROY_PA: f64 = 250_000.0;
+pub const LEO_G_DESTROY: f64 = 18.0;
+pub const LEO_Q_ALPHA_DESTROY: f64 = 4_200.0;
+pub const LEO_RATE_DESTROY_RAD_S: f64 = 5.0;
 pub const RTLS_TIMEOUT_S: f64 = 420.0;
-pub const LEO_TIMEOUT_S: f64 = 2_800.0;
+pub const LEO_TIMEOUT_S: f64 = 3_200.0;
 
 /// Landing success box (engine-bell / pad frame).
 pub const SUCCESS_ENGINE_ALT_M: f64 = 10.0;
