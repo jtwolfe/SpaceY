@@ -523,7 +523,7 @@ fn leo_landing_burn(nav: &Nav, u: &mut Controls, desired_x: &mut Vec3) {
         || nav.v_enu.x * to_pad.x + nav.v_enu.y * to_pad.y > 0.0;
 
     // In / next to the success box: pulse, do not hover-climb.
-    if pz < 14.0 && nav.speed < 8.0 && range < 28.0 && nav.fuel > 25.0 {
+    if pz < 14.0 && nav.speed < 8.0 && range < 28.0 && nav.fuel > 1.0 {
         leo_terminal_hover(nav, u, desired_x);
         return;
     }
@@ -534,11 +534,9 @@ fn leo_landing_burn(nav: &Nav, u: &mut Controls, desired_x: &mut Vec3) {
     let s_box = (pz - 8.0).max(4.0);
     let a_need_1 = (v * v - 25.0).max(0.0) / (2.0 * s_box);
 
-    // Last half-kilometre: time the center engine to ~5 m/s at ~8 m.
-    // Full-throttle from 80–250 m empties the tanks at 50–170 m; dropping
-    // the burn at 80 kg then falls through the box. Stay on this law
-    // down to the last tens of kilograms.
-    if pz < 500.0 && range < 3_000.0 && nav.fuel > 25.0 && (v > 5.0 || pz > 14.0) {
+    // Last ~600 m: time the center engine to ~5 m/s at ~8 m.
+    // Targeting the box from 3 km dumps the stash and stops short.
+    if pz < 600.0 && range < 3_000.0 && nav.fuel > 1.0 && (v > 5.0 || pz > 14.0) {
         let need_3 = a_need_1 > a1 * 1.08 && pz < 200.0 && v > 50.0 && nav.fuel > 250.0;
         leo_suicide_slam(nav, u, desired_x, to_pad, range, vh, vz, pz, nav.q, need_3);
         return;
@@ -652,7 +650,7 @@ fn leo_suicide_slam(
     desired_x: &mut Vec3,
     to_pad: Vec3,
     range: f64,
-    _vh: f64,
+    vh: f64,
     vz: f64,
     pz: f64,
     q: f64,
@@ -666,18 +664,21 @@ fn leo_suicide_slam(
     let mut aim = vdir;
     // Small pad mix only when slow and low. Mixing at 40 m/s / 200 m
     // rotated tilt 10° → 34° and wasted the stash sideways.
-    if range > 8.0 && q < 8_000.0 && pz < 90.0 && nav.speed < 22.0 {
+    // `desired_x = −aim` and thrust is along +X, so mixing +to_pad into
+    // aim *pushes the stack away from LZ-1*. Subtract so leftover
+    // offset closes once horizontal is already slow.
+    if range > 8.0 && q < 8_000.0 && pz < 120.0 && vh < 18.0 {
         let pad_h = to_pad.normalized();
-        let mix = ((range - 8.0) / 50.0).clamp(0.0, 0.22);
-        aim = (aim * (1.0 - mix) + Vec3::new(pad_h.x, pad_h.y, 0.0) * mix).normalized();
+        let mix = ((range - 8.0) / 60.0).clamp(0.0, 0.14);
+        aim = (aim * (1.0 - mix) - Vec3::new(pad_h.x, pad_h.y, 0.0) * mix).normalized();
     }
     *desired_x = -enu_to_approx(aim, nav);
     let up_w = if q > 11_000.0 || pz > 120.0 || nav.speed > 22.0 {
         0.0
-    } else if pz < 40.0 && nav.speed < 12.0 {
+    } else if pz < 40.0 && nav.speed < 12.0 && range < 14.0 {
         0.85
     } else {
-        0.20
+        0.15
     };
     *desired_x = (*desired_x * (1.0 - up_w) + nav.up * up_w).normalized();
 
@@ -694,26 +695,33 @@ fn leo_suicide_slam(
         N_ENGINES_LANDING
     };
     let t_avail = MERLIN_THRUST_SL_N * u.n_engines as f64;
-    // Distance-to-go suicide: a_need so we hit ~5 m/s at ~8 m engine alt.
-    // Soft enough that 250 m / 60 m/s is ~50% (not a tank dump that
-    // stops at 170 m), late enough that 80 m / 34 m/s still lights.
-    let s_box = (pz - 8.0).max(4.0);
-    let a_need = (nav.speed * nav.speed - 25.0).max(0.0) / (2.0 * s_box);
+    // High-alt (on_1): bleed toward ~90 m/s at 500 m, not the 8 m box.
+    // Last 600 m: hit ~5 m/s at ~8 m engine alt.
+    let (v_end, h_end) = if pz > 600.0 {
+        (90.0, 500.0)
+    } else {
+        (5.0, 6.0)
+    };
+    let s_box = (pz - h_end).max(3.0);
+    let a_need = (nav.speed * nav.speed - v_end * v_end).max(0.0) / (2.0 * s_box);
     let a_hold = if pz < 90.0 && nav.speed > 6.0 {
-        // Below the curve, still descending: keep ~constant speed so
-        // g does not rebuild a 40 m/s hit from an 85 m / 22 m/s coast.
         0.35
     } else {
         0.0
     };
     let a_cmd = a_need.max(a_hold);
-    if a_cmd < 0.4 && !(pz < 20.0 && nav.speed > 5.0) {
+    if a_cmd < 0.4 && !(pz < 16.0 && nav.speed > 5.0) {
         u.n_engines = 0;
         u.throttle = 0.0;
         return;
     }
     let thr = saturate((a_cmd + G0) * nav.mass / t_avail.max(1.0));
+    // Last metres: 50% under-throttle left seed 88 at 7 m/s / 6 m
+    // engine with empty tanks — 1 m/s outside the box. Full 1-engine
+    // for ~0.2 s closes that while fuel remains.
     u.throttle = if three && nav.speed > 80.0 {
+        1.0
+    } else if pz < 14.0 && nav.speed > 6.0 && vz < 0.0 {
         1.0
     } else if pz < 20.0 && nav.speed > 5.0 && vz < 0.0 {
         thr.max(THROTTLE_MIN)
@@ -1007,7 +1015,10 @@ pub fn fuel_infeasible_for(nav: &Nav, phase: Phase, scenario: Scenario) -> bool 
         // Last metres: a 40–80 kg stack at 10–30 m/s is still on the
         // suicide curve. The old `need * 0.40` (+60 m/s pad) killed
         // seed 88 at 50 m / 11 m/s / 80 kg — still in play.
-        if nav.engine_alt < 200.0 && range < 120.0 && nav.fuel > 25.0 && nav.speed < 50.0 {
+        if nav.engine_alt < 80.0 && range < 80.0 && nav.speed < 20.0 {
+            return false;
+        }
+        if nav.engine_alt < 200.0 && range < 120.0 && nav.fuel > 8.0 && nav.speed < 50.0 {
             return false;
         }
         // In theater: only fail if we cannot kill the remaining velocity.
