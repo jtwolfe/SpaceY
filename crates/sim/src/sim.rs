@@ -767,6 +767,42 @@ mod tests {
     }
 
     #[test]
+    fn leo_nominal_hits_success_box() {
+        // #4 reached a fuel-feasible theater and then slid ~50 km east
+        // and dried. A zero-residual episode must now actually land
+        // inside the success box a meaningful fraction of the time.
+        let seeds = [3u32, 20, 54, 88];
+        let mut landed = 0u32;
+        for seed in seeds {
+            let mut sim = Sim::new_with(seed, true, 0.0, Scenario::LeoDeorbit, Weather::default());
+            let mut guard = 0;
+            while !sim.terminated() && guard < 140_000 {
+                sim.step(sim.adaptive_dt());
+                guard += 1;
+            }
+            if sim.term == TermReason::Success {
+                landed += 1;
+            } else {
+                eprintln!(
+                    "seed {seed}: term={} dest='{}' phase={:?} alt={:.0} spd={:.1} range_h={:.0} fuel={:.0} intact={}",
+                    sim.term.as_str(),
+                    sim.destroy_reason.as_str(),
+                    sim.phase,
+                    sim.last_nav.alt,
+                    sim.last_nav.speed,
+                    sim.last_nav.range_h,
+                    sim.fuel,
+                    sim.intact
+                );
+            }
+        }
+        assert!(
+            landed >= 1,
+            "expected ≥1/4 LEO nominals to hit the success box, got {landed}"
+        );
+    }
+
+    #[test]
     fn rtls_nominal_still_terminates() {
         let mut sim = Sim::new(1, true, 1.0);
         for _ in 0..30_000 {

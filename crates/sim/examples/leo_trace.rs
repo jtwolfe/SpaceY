@@ -27,7 +27,12 @@ fn main() {
             min_gc_fuel = sim.fuel;
         }
         let in_entry = sim.t > 2480.0 || sim.last_nav.range_gc < 1_200_000.0;
-        if in_entry && (sim.t - last_print > 8.0 || sim.terminated()) {
+        let dt_print = if sim.phase == spacey_sim::guidance::Phase::Landing {
+            1.5
+        } else {
+            8.0
+        };
+        if in_entry && (sim.t - last_print > dt_print || sim.terminated()) {
             last_print = sim.t;
             println!(
                 "{:>8.1} {:>8.2} {:>8.0} {:>8.1} {:>8.1} {:>8.1} {:>7.1} {:>6.2} {:>6.2} {:>4} {:<8}",
