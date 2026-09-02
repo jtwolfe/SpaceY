@@ -11,17 +11,17 @@ use crate::guidance::{
     evaluate_contact, features, fuel_infeasible_for, ground_hit, impact_destroy, nav_from,
     nominal_controls, policy_residual, success, Nav, Phase, TermReason, N_WEIGHTS,
 };
-use crate::math::{Quat, Vec3};
+use crate::math::{sqrt, Quat, Vec3};
 use crate::constants::inertia_diag;
 use crate::scenario::Scenario;
 use crate::vehicle::{aero, check_destruction_limits, propulsion, rcs_moment, DestroyReason};
 use crate::wind::{Weather, Wind};
-use rand::rngs::SmallRng;
+use rand::rngs::StdRng;
 use rand::SeedableRng;
 use serde::Serialize;
 
 fn predicted_overshoot_proxy(nav: &Nav) -> f64 {
-    let vh = (nav.v_enu.x * nav.v_enu.x + nav.v_enu.y * nav.v_enu.y).sqrt();
+    let vh = sqrt(nav.v_enu.x * nav.v_enu.x + nav.v_enu.y * nav.v_enu.y);
     let t = nav.alt / (-nav.v_enu.z).max(30.0);
     vh * t * 0.55 - nav.range_h
 }
@@ -84,7 +84,10 @@ impl Sim {
         scenario: Scenario,
         weather: Weather,
     ) -> Self {
-        let mut rng = SmallRng::seed_from_u64(seed as u64 + 17);
+        // StdRng (ChaCha) is portable across wasm32 (32-bit) and native
+        // x86_64. SmallRng is xoshiro256++ vs xoshiro128++ and spawned
+        // LEO 240 km apart — that was the “600 m skip” , not just libm.
+        let mut rng = StdRng::seed_from_u64(seed as u64 + 17);
         let spawn = scenario.spawn(&mut rng);
         let fuel = spawn.fuel;
         let mut s = Self {
@@ -159,23 +162,25 @@ impl Sim {
     }
 
     pub fn adaptive_dt(&self) -> f64 {
+        // Altitude + burn only. Q-threshold dt (40 kPa / 15 kPa) flipped
+        // between host and wasm32 on a 0.1% Q difference and walked the
+        // LEO skip hundreds of metres.
         let burning = self.last_thrust > 1_000.0;
+        let alt = self.last_nav.alt;
         if burning {
             if self.last_nav.engine_alt > 2_000.0 {
                 0.04
             } else {
                 0.02
             }
-        } else if self.last_nav.alt > 150_000.0 && self.last_aero_q < 50.0 {
+        } else if alt > 150_000.0 {
             1.20
-        } else if self.last_nav.alt > 65_000.0 && self.last_aero_q < 200.0 {
+        } else if alt > 80_000.0 {
             0.20
-        } else if self.last_aero_q > 40_000.0 {
-            0.008
-        } else if self.last_aero_q > 15_000.0 {
+        } else if alt > 40_000.0 {
+            0.010
+        } else if alt > 12_000.0 {
             0.012
-        } else if self.last_nav.alt > 25_000.0 && self.last_aero_q < 8_000.0 {
-            0.07
         } else if self.last_nav.engine_alt > 2_000.0 {
             0.04
         } else {
@@ -228,7 +233,7 @@ impl Sim {
             0.50
         };
         let dt = dt.clamp(0.001, dt_max);
-        let mut rng = SmallRng::seed_from_u64((self.seed as u64).wrapping_add((self.t * 1e4) as u64));
+        let mut rng = StdRng::seed_from_u64((self.seed as u64).wrapping_add((self.t * 1e4) as u64));
         self.wind.step(dt, &mut rng);
 
         let (r_ecef, v_ground) = eci_vel_to_ecef_ground(self.r_eci, self.v_eci, self.t);
@@ -558,6 +563,46 @@ pub fn episode_fitness(sim: &Sim) -> f64 {
     f
 }
 
+/// Same adaptive_dt loop the browser `fast_forward` / display warp uses.
+pub fn run_leo_nominal_snapshot(
+    seed: u32,
+    destroy: bool,
+    wind_scale: f64,
+    max_steps: u32,
+) -> Snapshot {
+    let mut sim = Sim::new_with(
+        seed,
+        destroy,
+        wind_scale,
+        Scenario::LeoDeorbit,
+        Weather::default(),
+    );
+    let cap = if max_steps == 0 { 140_000 } else { max_steps };
+    let mut guard = 0u32;
+    while !sim.terminated() && guard < cap {
+        sim.step(sim.adaptive_dt());
+        guard += 1;
+    }
+    sim.snapshot()
+}
+
+/// Integrate until sim time `until_t` (or term). For native-vs-wasm drift probes.
+pub fn run_leo_until(seed: u32, destroy: bool, wind_scale: f64, until_t: f64) -> Snapshot {
+    let mut sim = Sim::new_with(
+        seed,
+        destroy,
+        wind_scale,
+        Scenario::LeoDeorbit,
+        Weather::default(),
+    );
+    let mut guard = 0u32;
+    while !sim.terminated() && sim.t < until_t && guard < 140_000 {
+        sim.step(sim.adaptive_dt());
+        guard += 1;
+    }
+    sim.snapshot()
+}
+
 pub fn run_episode(weights: &[f64], seed: u32, destroy: bool, wind_scale: f64) -> (f64, TermReason, Nav) {
     run_episode_with(
         weights,
@@ -800,6 +845,22 @@ mod tests {
             landed >= 1,
             "expected ≥1/4 LEO nominals to hit the success box, got {landed}"
         );
+    }
+
+    #[test]
+    fn leo_browser_adaptive_dt_path_lands() {
+        // Same `adaptive_dt` loop as `Engine::fast_forward` / display warp.
+        // Seed 88 is the documented in-browser LEO land (destruction on,
+        // wind 0). Portable StdRng + libm — not a wasm-only cheat.
+        let snap = run_leo_nominal_snapshot(88, true, 0.0, 140_000);
+        assert!(
+            snap.success,
+            "seed 88 browser path: term={} range_h={:.1} spd={:.2} fuel={:.1} intact={} dest={}",
+            snap.term, snap.range_h, snap.speed, snap.fuel, snap.intact, snap.destroy_reason
+        );
+        assert!(snap.intact);
+        assert_eq!(snap.term, "landed");
+        assert!(snap.range_h < SUCCESS_PAD_OFFSET_M + 1.0);
     }
 
     #[test]

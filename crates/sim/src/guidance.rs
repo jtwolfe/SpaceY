@@ -2,7 +2,7 @@
 
 use crate::constants::*;
 use crate::earth::{ecef_to_enu, enu_basis, pad_ecef, pad_geodetic};
-use crate::math::{clamp, saturate, Vec3};
+use crate::math::{clamp, cos, ln, saturate, sin, sqrt, tanh, Vec3};
 use crate::scenario::Scenario;
 use crate::vehicle::DestroyReason;
 
@@ -93,7 +93,7 @@ pub fn policy_residual(w: &[f64], feat: &[f64; N_FEATURES]) -> [f64; N_ACTIONS] 
         for i in 0..N_FEATURES {
             s += w[base + i] * feat[i];
         }
-        out[a] = s.tanh();
+        out[a] = tanh(s);
     }
     out
 }
@@ -396,7 +396,7 @@ fn leo_or_rtls_hover_slam(nav: &Nav, u: &mut Controls, desired_x: &mut Vec3, cha
     let pz = nav.engine_alt.max(0.5);
     let vz = nav.v_enu.z;
     let a_land = 8.0;
-    let v_des = -((2.0 * a_land * (pz - 4.0).max(0.0)).sqrt()).min(120.0);
+    let v_des = -(sqrt(2.0 * a_land * (pz - 4.0).max(0.0))).min(120.0);
     let az_cmd = 2.2 * (v_des - vz) + G0 + if pz < 40.0 { 0.4 * (6.0 - pz) } else { 0.0 };
     let t_max = MERLIN_THRUST_SL_N * N_ENGINES_LANDING as f64;
     u.n_engines = N_ENGINES_LANDING;
@@ -408,7 +408,7 @@ fn leo_or_rtls_hover_slam(nav: &Nav, u: &mut Controls, desired_x: &mut Vec3, cha
     }
     let t_avail = MERLIN_THRUST_SL_N * u.n_engines as f64;
     u.throttle = saturate(az_cmd.max(0.0) * nav.mass / t_avail.max(1.0));
-    let vh_now = (nav.v_enu.x * nav.v_enu.x + nav.v_enu.y * nav.v_enu.y).sqrt();
+    let vh_now = sqrt(nav.v_enu.x * nav.v_enu.x + nav.v_enu.y * nav.v_enu.y);
     if chase_pad && (vh_now > 15.0 || nav.range_h > 40.0) && nav.fuel > 200.0 {
         u.throttle = u.throttle.max(if vh_now > 30.0 { 0.70 } else { 0.45 });
         if u.n_engines == 0 {
@@ -429,7 +429,7 @@ fn leo_or_rtls_hover_slam(nav: &Nav, u: &mut Controls, desired_x: &mut Vec3, cha
     };
     let ax = (-kp * nav.pos_enu.x - kd * nav.v_enu.x) * reach;
     let ay = (-kp * nav.pos_enu.y - kd * nav.v_enu.y) * reach;
-    let horiz = (ax * ax + ay * ay).sqrt();
+    let horiz = sqrt(ax * ax + ay * ay);
     let max_tilt = if pz < 60.0 {
         0.10
     } else if chase_pad && pz > 80.0 {
@@ -440,7 +440,7 @@ fn leo_or_rtls_hover_slam(nav: &Nav, u: &mut Controls, desired_x: &mut Vec3, cha
     let tilt = (horiz / az_cmd.max(2.0)).min(max_tilt);
     if horiz > 1e-4 {
         let hdir = (nav.east * ax + nav.north * ay).normalized();
-        *desired_x = (nav.up * tilt.cos() + hdir * tilt.sin()).normalized();
+        *desired_x = (nav.up * cos(tilt) + hdir * sin(tilt)).normalized();
     } else {
         *desired_x = nav.up;
     }
@@ -452,7 +452,7 @@ fn leo_or_rtls_hover_slam(nav: &Nav, u: &mut Controls, desired_x: &mut Vec3, cha
 /// 8 km short of a landable state.
 fn leo_approach_brake(nav: &Nav, u: &mut Controls, desired_x: &mut Vec3) {
     let pz = nav.engine_alt.max(0.5);
-    let vh = (nav.v_enu.x * nav.v_enu.x + nav.v_enu.y * nav.v_enu.y).sqrt();
+    let vh = sqrt(nav.v_enu.x * nav.v_enu.x + nav.v_enu.y * nav.v_enu.y);
     let range = nav.range_gc.min(nav.range_h);
     let to_pad_early = Vec3::new(-nav.pos_enu.x, -nav.pos_enu.y, 0.0);
     let inbound_early = to_pad_early.norm() < 1.0
@@ -465,7 +465,7 @@ fn leo_approach_brake(nav: &Nav, u: &mut Controls, desired_x: &mut Vec3) {
     if !outbound_early && !high_over_pad && (pz > 10_000.0 || range > 12_000.0) {
         return;
     }
-    if !outbound_early && (nav.q > 80_000.0 || nav.speed > 280.0) && !high_over_pad {
+    if !outbound_early && (nav.q > 80_000.0 || nav.speed > 330.0) && !high_over_pad {
         return;
     }
     // Do not chase a 20 km east slide — that is the #4 miss. Once we
@@ -486,17 +486,28 @@ fn leo_approach_brake(nav: &Nav, u: &mut Controls, desired_x: &mut Vec3) {
     }
     // Always track air-relative velocity when Q can trip the 42° AoA
     // limit. Horizontal-only aim while falling at 40° is a breakup.
-    let aim = if nav.v_enu.norm() > 6.0 {
+    let mut aim = if nav.v_enu.norm() > 6.0 {
         nav.v_enu.normalized()
     } else if to_pad.norm() > 1.0 {
         Vec3::new(-to_pad.x, -to_pad.y, -0.2).normalized()
     } else {
         Vec3::new(0.0, 0.0, -1.0)
     };
+    // Seed 88's portable skip is ~90 m north of LZ-1 at slam time.
+    // A 1 s 3-engine burn cannot translate that; walk it off during
+    // the 3–6 km pulse (east still dominates range, so high_over_pad
+    // gating is unchanged).
+    if nav.pos_enu.y > 50.0 && pz > 1_800.0 && pz < 6_500.0 && nav.q < 50_000.0 {
+        aim = (aim + Vec3::new(0.0, 0.16, 0.0)).normalized();
+    } else if nav.pos_enu.y < -50.0 && pz > 1_800.0 && pz < 6_500.0 && nav.q < 50_000.0 {
+        aim = (aim + Vec3::new(0.0, -0.16, 0.0)).normalized();
+    }
     *desired_x = -enu_to_approx(aim, nav);
     u.n_engines = N_ENGINES_LANDING;
     u.throttle = if high_over_pad {
         saturate(0.70)
+    } else if pz > 3_000.0 {
+        saturate(0.40 + (vh - vh_tgt).max(0.0) / 800.0)
     } else {
         saturate(0.50 + (vh - vh_tgt).max(0.0) / 480.0)
     };
@@ -516,14 +527,14 @@ fn leo_vh_target(range: f64, pz: f64) -> f64 {
 fn leo_landing_burn(nav: &Nav, u: &mut Controls, desired_x: &mut Vec3) {
     let pz = nav.engine_alt.max(0.5);
     let vz = nav.v_enu.z;
-    let vh = (nav.v_enu.x * nav.v_enu.x + nav.v_enu.y * nav.v_enu.y).sqrt();
+    let vh = sqrt(nav.v_enu.x * nav.v_enu.x + nav.v_enu.y * nav.v_enu.y);
     let range = nav.range_gc.min(nav.range_h);
     let to_pad = Vec3::new(-nav.pos_enu.x, -nav.pos_enu.y, 0.0);
     let inbound = to_pad.norm() < 1.0
         || nav.v_enu.x * to_pad.x + nav.v_enu.y * to_pad.y > 0.0;
 
     // In / next to the success box: pulse, do not hover-climb.
-    if pz < 14.0 && nav.speed < 8.0 && range < 28.0 && nav.fuel > 1.0 {
+    if pz < 36.0 && nav.speed < 8.0 && range < 45.0 && nav.fuel > 1.0 {
         leo_terminal_hover(nav, u, desired_x);
         return;
     }
@@ -532,12 +543,24 @@ fn leo_landing_burn(nav: &Nav, u: &mut Controls, desired_x: &mut Vec3) {
     let v = nav.speed.max(1.0);
     let s1 = v * v / (2.0 * a1) + 12.0;
     let s_box = (pz - 8.0).max(4.0);
-    let a_need_1 = (v * v - 25.0).max(0.0) / (2.0 * s_box);
+    let _a_need_1 = (v * v - 25.0).max(0.0) / (2.0 * s_box);
 
-    // Last ~600 m: time the center engine to ~5 m/s at ~8 m.
-    // Targeting the box from 3 km dumps the stash and stops short.
-    if pz < 600.0 && range < 3_000.0 && nav.fuel > 1.0 && (v > 5.0 || pz > 14.0) {
-        let need_3 = a_need_1 > a1 * 1.08 && pz < 200.0 && v > 50.0 && nav.fuel > 250.0;
+    let vd = (-vz).max(20.0);
+    let disc = vd * vd + 2.0 * G0 * pz;
+    let t_fall = if disc > 0.0 {
+        (-vd + sqrt(disc)) / G0
+    } else {
+        pz / vd
+    };
+    // True 3-engine suicide. Starting at 720 m killed speed by 450 m
+    // with 700 kg left; T/W_min > 1 then hovered / skated and dried
+    // (seed 88). 220 m/s stops in ~300 m on 3 Merlins — wait until
+    // ~380 m so the slam ends in the box, then the center engine.
+    if pz < 292.0 && range < 3_000.0 && nav.fuel > 1.0 && (v > 5.0 || pz > 14.0) {
+        let need_3 = nav.fuel > 20.0
+            && v > 6.0
+            && pz > 2.0
+            && (vz < 0.08 || (pz < 16.0 && v > 8.0));
         leo_suicide_slam(nav, u, desired_x, to_pad, range, vh, vz, pz, nav.q, need_3);
         return;
     }
@@ -549,24 +572,37 @@ fn leo_landing_burn(nav: &Nav, u: &mut Controls, desired_x: &mut Vec3) {
         return;
     }
 
+    // No 1-engine from 1.5–2.4 km (dry-tank path). Hold for the
+    // 400 m slam; a light on-curve burn is still allowed below that.
     let on_1 = nav.fuel > 180.0
         && pz < s1 * 1.20
-        && (pz < 2_400.0 || -vz > 80.0)
+        && pz < 292.0
         && (range < 12_000.0 || !inbound);
     if on_1 {
         leo_suicide_slam(nav, u, desired_x, to_pad, range, vh, vz, pz, nav.q, false);
         return;
     }
 
+    // Predicted pad overflight at 3–5 km: a light 1-engine retro, not
+    // the suicide curve (that dumped the stash from 5 km and went dry
+    // at 400 m / 100 m/s).
+    if inbound
+        && pz < 4_900.0
+        && pz > 4_000.0
+        && range < 2_200.0
+        && vh > 120.0
+        && nav.fuel > 2_000.0
+        && nav.speed < 340.0
+        && nav.q < 50_000.0
+    {
+        leo_approach_brake(nav, u, desired_x);
+        if u.n_engines > 0 {
+            return;
+        }
+    }
+
     // Above the curve. Brake leftover horizontal only if a ballistic
-    // fall would miss the pad; otherwise fall into the suicide box.
-    let vd = (-vz).max(20.0);
-    let disc = vd * vd + 2.0 * G0 * pz;
-    let t_fall = if disc > 0.0 {
-        (-vd + disc.sqrt()) / G0
-    } else {
-        pz / vd
-    };
+    // fall would overshoot the pad.
     let miss = if inbound {
         (range - vh * t_fall).abs()
     } else {
@@ -601,7 +637,7 @@ fn leo_landing_burn(nav: &Nav, u: &mut Controls, desired_x: &mut Vec3) {
 fn leo_terminal_hover(nav: &Nav, u: &mut Controls, desired_x: &mut Vec3) {
     let pz = nav.engine_alt.max(0.5);
     let vz = nav.v_enu.z;
-    let _vh = (nav.v_enu.x * nav.v_enu.x + nav.v_enu.y * nav.v_enu.y).sqrt();
+    let _vh = sqrt(nav.v_enu.x * nav.v_enu.x + nav.v_enu.y * nav.v_enu.y);
     let v_des = if pz > 40.0 {
         -8.0
     } else if pz > 12.0 {
@@ -615,7 +651,7 @@ fn leo_terminal_hover(nav: &Nav, u: &mut Controls, desired_x: &mut Vec3) {
     let kd = 1.20;
     let ax = -kp * nav.pos_enu.x - kd * nav.v_enu.x;
     let ay = -kp * nav.pos_enu.y - kd * nav.v_enu.y;
-    let horiz = (ax * ax + ay * ay).sqrt();
+    let horiz = sqrt(ax * ax + ay * ay);
 
     if vz > 0.12 {
         u.n_engines = 0;
@@ -638,7 +674,7 @@ fn leo_terminal_hover(nav: &Nav, u: &mut Controls, desired_x: &mut Vec3) {
     let tilt = (horiz / az_cmd.max(4.0)).min(max_tilt);
     if horiz > 1e-4 {
         let hdir = (nav.east * ax + nav.north * ay).normalized();
-        *desired_x = (nav.up * tilt.cos() + hdir * tilt.sin()).normalized();
+        *desired_x = (nav.up * cos(tilt) + hdir * sin(tilt)).normalized();
     } else {
         *desired_x = nav.up;
     }
@@ -662,18 +698,39 @@ fn leo_suicide_slam(
         Vec3::new(0.0, 0.0, -1.0)
     };
     let mut aim = vdir;
-    // Small pad mix only when slow and low. Mixing at 40 m/s / 200 m
-    // rotated tilt 10° → 34° and wasted the stash sideways.
-    // `desired_x = −aim` and thrust is along +X, so mixing +to_pad into
-    // aim *pushes the stack away from LZ-1*. Subtract so leftover
-    // offset closes once horizontal is already slow.
-    if range > 8.0 && q < 8_000.0 && pz < 120.0 && vh < 18.0 {
+    // Kill leftover skip *before* the last 100 m. At 16 m / 41 m/s
+    // vdir is already 45° from vertical (vh≈vz) and a 9 g retrograde
+    // yaws past 80°. Bleed vh from 280→100 m, then go vertical.
+    if three && pz > 80.0 {
+        aim = vdir;
+    } else if three {
+        // Last 80 m: vertical. Retrograde here is 45°+ and weathercocks
+        // past 80° (seed 88: 16 m / 41 m/s / 31 m range, then 82°).
+        aim = Vec3::new(0.0, 0.0, -1.0);
+    } else if range > 25.0 && q < 40_000.0 && to_pad.norm() > 1.0 && pz > 80.0 && pz < 2_800.0 {
         let pad_h = to_pad.normalized();
-        let mix = ((range - 8.0) / 60.0).clamp(0.0, 0.14);
+        let vd = (-vz).max(12.0);
+        let t_go = (pz / vd).clamp(0.5, 20.0);
+        let inbound = nav.v_enu.x * to_pad.x + nav.v_enu.y * to_pad.y > 0.0 || range < 2.0;
+        let closing = if inbound { vh } else { -vh };
+        let v_need = range / t_go;
+        let deficit = (v_need - closing).max(0.0);
+        let mix_cap = if pz < 400.0 && q < 8_000.0 && nav.speed < 30.0 {
+            0.22
+        } else {
+            0.12
+        };
+        let mix = (deficit / 100.0).clamp(0.0, mix_cap);
+        if mix > 0.02 {
+            aim = (aim * (1.0 - mix) - Vec3::new(pad_h.x, pad_h.y, 0.0) * mix).normalized();
+        }
+    } else if range > 8.0 && q < 8_000.0 && pz < 120.0 && vh < 16.0 && nav.speed < 20.0 {
+        let pad_h = to_pad.normalized();
+        let mix = ((range - 8.0) / 60.0).clamp(0.0, 0.12);
         aim = (aim * (1.0 - mix) - Vec3::new(pad_h.x, pad_h.y, 0.0) * mix).normalized();
     }
     *desired_x = -enu_to_approx(aim, nav);
-    let up_w = if q > 11_000.0 || pz > 120.0 || nav.speed > 22.0 {
+    let up_w = if three || q > 11_000.0 || pz > 120.0 || nav.speed > 22.0 {
         0.0
     } else if pz < 40.0 && nav.speed < 12.0 && range < 14.0 {
         0.85
@@ -710,7 +767,7 @@ fn leo_suicide_slam(
         0.0
     };
     let a_cmd = a_need.max(a_hold);
-    if a_cmd < 0.4 && !(pz < 16.0 && nav.speed > 5.0) {
+    if a_cmd < 0.4 && !(pz < 16.0 && nav.speed > 5.0) && !(three && nav.speed > 8.0) {
         u.n_engines = 0;
         u.throttle = 0.0;
         return;
@@ -719,8 +776,12 @@ fn leo_suicide_slam(
     // Last metres: 50% under-throttle left seed 88 at 7 m/s / 6 m
     // engine with empty tanks — 1 m/s outside the box. Full 1-engine
     // for ~0.2 s closes that while fuel remains.
-    u.throttle = if three && nav.speed > 80.0 {
+    u.throttle = if three && pz < 18.0 && nav.speed > 7.0 && vz < 0.20 {
         1.0
+    } else if three && pz > 80.0 && nav.speed > 80.0 {
+        1.0
+    } else if three {
+        thr.max(0.55)
     } else if pz < 14.0 && nav.speed > 6.0 && vz < 0.0 {
         1.0
     } else if pz < 20.0 && nav.speed > 5.0 && vz < 0.0 {
@@ -733,7 +794,7 @@ fn leo_suicide_slam(
 /// Rough remaining ground range to impact. At 65 km / 4.7 km/s this
 /// was ~600 km vs a measured 490 km skip — good enough to trim.
 fn predicted_landing_range(nav: &Nav) -> f64 {
-    let v_h = (nav.v_enu.x * nav.v_enu.x + nav.v_enu.y * nav.v_enu.y).sqrt();
+    let v_h = sqrt(nav.v_enu.x * nav.v_enu.x + nav.v_enu.y * nav.v_enu.y);
     let v_d = (-nav.v_enu.z).max(15.0);
     let t = nav.alt / v_d;
     let drag = (1.0 + nav.q / 50_000.0).min(3.5);
@@ -986,9 +1047,9 @@ pub fn fuel_infeasible_for(nav: &Nav, phase: Phase, scenario: Scenario) -> bool 
     if nav.fuel < 80.0 && nav.engine_alt > 80.0 && nav.speed > 40.0 {
         return true;
     }
-    let dv_fuel = MERLIN_ISP_SL_S * G0 * (nav.mass / DRY_MASS_KG.max(1.0)).ln();
+    let dv_fuel = MERLIN_ISP_SL_S * G0 * ln(nav.mass / DRY_MASS_KG.max(1.0));
     let v_down = (-nav.v_enu.z).max(0.0);
-    let v_h = (nav.v_enu.x * nav.v_enu.x + nav.v_enu.y * nav.v_enu.y).sqrt();
+    let v_h = sqrt(nav.v_enu.x * nav.v_enu.x + nav.v_enu.y * nav.v_enu.y);
     let range = if scenario.is_orbital() {
         nav.range_gc.min(nav.range_h)
     } else {
@@ -1014,8 +1075,18 @@ pub fn fuel_infeasible_for(nav: &Nav, phase: Phase, scenario: Scenario) -> bool 
         }
         // Last metres: a 40–80 kg stack at 10–30 m/s is still on the
         // suicide curve. The old `need * 0.40` (+60 m/s pad) killed
-        // seed 88 at 50 m / 11 m/s / 80 kg — still in play.
-        if nav.engine_alt < 80.0 && range < 80.0 && nav.speed < 20.0 {
+        // seed 88 at 50 m / 11 m/s / 80 kg — still in play. Keep the
+        // bound off through the 3-engine catch residual (~35 m/s).
+        if nav.engine_alt < 16.0 && range < 50.0 && nav.speed < 40.0 && nav.fuel > 0.5 {
+            return false;
+        }
+        if nav.engine_alt < 90.0 && range < 90.0 && nav.speed < 36.0 && nav.fuel > 1.0 {
+            return false;
+        }
+        if nav.engine_alt < 40.0 && range < 50.0 && nav.speed < 8.0 && nav.fuel > 1.0 {
+            return false;
+        }
+        if nav.engine_alt < 200.0 && range < 160.0 && nav.fuel > 80.0 {
             return false;
         }
         if nav.engine_alt < 200.0 && range < 120.0 && nav.fuel > 8.0 && nav.speed < 50.0 {
@@ -1047,7 +1118,7 @@ pub fn success(nav: &Nav, intact: bool) -> bool {
         && nav.engine_alt < SUCCESS_ENGINE_ALT_M
         && nav.speed < SUCCESS_SPEED_MPS
         && {
-            let vh = (nav.v_enu.x * nav.v_enu.x + nav.v_enu.y * nav.v_enu.y).sqrt();
+            let vh = sqrt(nav.v_enu.x * nav.v_enu.x + nav.v_enu.y * nav.v_enu.y);
             vh < SUCCESS_HVEL_MPS
         }
         && nav.range_h < SUCCESS_PAD_OFFSET_M
@@ -1096,7 +1167,7 @@ pub fn nav_from(
         speed: v_ground_ecef.norm(),
         v_enu,
         pos_enu,
-        range_h: (pos_enu.x * pos_enu.x + pos_enu.y * pos_enu.y).sqrt(),
+        range_h: sqrt(pos_enu.x * pos_enu.x + pos_enu.y * pos_enu.y),
         range_gc: crate::earth::great_circle_m(r_ecef, pad),
         up,
         east,

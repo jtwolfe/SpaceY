@@ -6,7 +6,7 @@
 //! is applied in the atmosphere lookup (still synthetic, never METAR).
 
 use crate::earth::enu_to_ecef_vec;
-use crate::math::{lerp, Vec3};
+use crate::math::{cos, exp, lerp, ln, sin, sqrt, Vec3};
 use rand::Rng;
 
 /// Independent sim-weather knobs on top of the layered climatology.
@@ -87,7 +87,7 @@ impl Wind {
         self.rng_state ^= self.rng_state >> 7;
         self.rng_state ^= self.rng_state << 17;
         let u2 = ((self.rng_state & 0xFFFFFF) as f64 + 1.0) / 16_777_217.0;
-        (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+        sqrt(-2.0 * ln(u1)) * cos(2.0 * std::f64::consts::PI * u2)
     }
 
     pub fn step(&mut self, dt: f64, rng: &mut impl Rng) {
@@ -101,10 +101,10 @@ impl Wind {
         if self.weather.shear {
             sigma *= 1.25;
         }
-        let a = (-dt / tau).exp();
+        let a = exp(-dt / tau);
         self.gust_enu = self.gust_enu * a
             + Vec3::new(self.next_gauss(), self.next_gauss(), self.next_gauss() * 0.3)
-                * (sigma * (1.0 - a * a).sqrt());
+                * (sigma * sqrt(1.0 - a * a));
     }
 
     pub fn mean_enu(&self, alt: f64) -> Vec3 {
@@ -134,7 +134,7 @@ impl Wind {
         let dir = dir * std::f64::consts::PI / 180.0;
         // "from" → toward
         let toward = dir + std::f64::consts::PI;
-        Vec3::new(speed * toward.sin(), speed * toward.cos(), 0.0)
+        Vec3::new(speed * sin(toward), speed * cos(toward), 0.0)
     }
 
     fn layer(&self, i: usize) -> (f64, f64, f64) {

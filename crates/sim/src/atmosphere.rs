@@ -5,6 +5,7 @@
 //! with the document's r0 = 6 356 766 m.
 
 use crate::constants::{GAMMA_AIR, G0, R_SPECIFIC_AIR};
+use crate::math::{exp, powf, sqrt};
 
 const R0: f64 = 6_356_766.0;
 const G_R: f64 = G0 / R_SPECIFIC_AIR;
@@ -64,9 +65,9 @@ pub fn lookup(altitude_m: f64) -> Air {
     let dh = h_geop - h_b;
     let t = t_b + lapse * dh;
     let p = if lapse.abs() < 1e-9 {
-        p_b * (-G_R * dh / t_b).exp()
+        p_b * exp(-G_R * dh / t_b)
     } else {
-        p_b * (t / t_b).powf(-G0 / (lapse * R_SPECIFIC_AIR))
+        p_b * powf(t / t_b, -G0 / (lapse * R_SPECIFIC_AIR))
     };
     from_tp(t, p)
 }
@@ -77,14 +78,14 @@ fn thermosphere(h_geom: f64) -> Air {
     let h0 = 86_000.0;
     let air86 = from_tp(T_TOP, P_TOP);
     let scale = 6_000.0;
-    let f = (-(h_geom - h0).max(0.0) / scale).exp();
+    let f = exp(-(h_geom - h0).max(0.0) / scale);
     let t = (T_TOP + 0.002 * (h_geom - h0)).min(1000.0);
     from_tp(t, (air86.pressure_pa * f).max(1e-8))
 }
 
 fn from_tp(t: f64, p: f64) -> Air {
     let density = p / (R_SPECIFIC_AIR * t);
-    let speed_of_sound = (GAMMA_AIR * R_SPECIFIC_AIR * t).sqrt();
+    let speed_of_sound = sqrt(GAMMA_AIR * R_SPECIFIC_AIR * t);
     Air {
         temperature_k: t,
         pressure_pa: p,

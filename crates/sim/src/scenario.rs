@@ -5,7 +5,7 @@ use crate::constants::*;
 use crate::earth::{
     ecef_to_geodetic, enu_basis, geodetic_to_ecef, pad_geodetic, Geodetic,
 };
-use crate::math::{Quat, Vec3};
+use crate::math::{asin, cos, sin, sqrt, Quat, Vec3};
 use rand::Rng;
 
 /// `0` = RTLS first-stage reentry (default). `1` = LEO-class deorbit.
@@ -83,7 +83,7 @@ pub struct Spawn {
 /// Current v1 start: ~80 km, ~2.05 km/s Earth-relative, westbound toward LZ-1.
 fn spawn_rtls(rng: &mut impl Rng) -> Spawn {
     let pad = pad_geodetic();
-    let dlon = 62_000.0 / (EARTH_RADIUS_EQ * pad.lat.cos());
+    let dlon = 62_000.0 / (EARTH_RADIUS_EQ * cos(pad.lat));
     let jitter = 0.0008 * (rng.gen::<f64>() - 0.5);
     let geo = Geodetic {
         lat: pad.lat + 0.0004 * (rng.gen::<f64>() - 0.5),
@@ -95,9 +95,9 @@ fn spawn_rtls(rng: &mut impl Rng) -> Spawn {
     let speed = 2_050.0 + 60.0 * (rng.gen::<f64>() - 0.5);
     let gamma = (-7.5 + rng.gen::<f64>() * 0.8) * std::f64::consts::PI / 180.0;
     let heading = (269.2 + rng.gen::<f64>() * 1.2) * std::f64::consts::PI / 180.0;
-    let vh = speed * gamma.cos();
-    let vu = speed * gamma.sin();
-    let v_enu = Vec3::new(vh * heading.sin(), vh * heading.cos(), vu);
+    let vh = speed * cos(gamma);
+    let vu = speed * sin(gamma);
+    let v_enu = Vec3::new(vh * sin(heading), vh * cos(heading), vu);
     let v_ground_ecef = east * v_enu.x + north * v_enu.y + up * v_enu.z;
     let omega_e = Vec3::new(0.0, 0.0, EARTH_OMEGA);
     let v_eci = v_ground_ecef + omega_e.cross(r_ecef);
@@ -121,27 +121,31 @@ fn spawn_rtls(rng: &mut impl Rng) -> Spawn {
 fn spawn_leo(rng: &mut impl Rng) -> Spawn {
     let pad = pad_geodetic();
     // Half-period of a 220 km circular orbit is ~44 min; Earth rotates ~11°.
-    let coast = 2_520.0 + 30.0 * (rng.gen::<f64>() - 0.5);
+    let coast = 2_520.0 + 8.0 * (rng.gen::<f64>() - 0.5);
     // Earth rotates east during the coast, so ECEF lon = ECI lon − ω t.
     // Place the inertial periapsis *east* of the desired ECEF periapsis
     // by ω·coast so the skip still happens ~920 km west of LZ-1.
     let lead = EARTH_OMEGA * coast;
     // Periapsis is west of the pad (eastbound capture) so the vehicle is
     // still inbound when the entry burn makes the orbit Earth-intersecting.
-    let uprange_lon = LEO_PERI_UPRANGE_M / (EARTH_RADIUS_EQ * pad.lat.cos().max(0.3));
+    let uprange_lon = LEO_PERI_UPRANGE_M / (EARTH_RADIUS_EQ * cos(pad.lat).max(0.3));
     // Due-east at periapsis is the orbit's northern apex. Over
     // `LEO_PERI_UPRANGE_M` of ground track the vehicle walks south of
     // the parallel (~27 km at 920 km / 28.5°N). Start that far north
     // so the skip crosses LZ-1 instead of passing 27 km south of it.
     let ang = LEO_PERI_UPRANGE_M / EARTH_RADIUS_EQ;
-    let south_drop = (pad.lat - (pad.lat.sin() * ang.cos()).asin()).max(0.0);
+    let south_drop = (pad.lat - asin(sin(pad.lat) * cos(ang))).max(0.0);
     // After the ECEF sign fix the skip walks further south than the
     // spherical due-east estimate. Scale so overflight is within
     // ~1–2 km of LZ-1; a 2 t landing burn cannot translate 11 km.
-    let south_drop = south_drop * 1.27;
+    // Portable StdRng + libm skip. 1.27 was a host-glibc / SmallRng
+    // (64-bit) tune and walked ~1.5 km south of LZ-1 on this path.
+    // Portable StdRng + libm skip. 1.27 was a host-glibc / SmallRng
+    // (64-bit) tune and walked ~1.5 km south of LZ-1 on this path.
+    let south_drop = south_drop * 1.30;
     let peri_geo = Geodetic {
-        lat: pad.lat + south_drop + 0.0006 * (rng.gen::<f64>() - 0.5),
-        lon: pad.lon + lead - uprange_lon + 0.003 * (rng.gen::<f64>() - 0.5),
+        lat: pad.lat + south_drop + 0.00012 * (rng.gen::<f64>() - 0.5),
+        lon: pad.lon + lead - uprange_lon + 0.0005 * (rng.gen::<f64>() - 0.5),
         alt: DEORBIT_PERI_TARGET_M,
     };
     let r_peri = geodetic_to_ecef(peri_geo);
@@ -150,7 +154,7 @@ fn spawn_leo(rng: &mut impl Rng) -> Spawn {
 
     // Just after apogee of the *post-deorbit* ellipse: ~175° of true anomaly
     // before periapsis. The start itself is circular at 220 km.
-    let nu = (174.0 + rng.gen::<f64>() * 3.0) * std::f64::consts::PI / 180.0;
+    let nu = (174.0 + rng.gen::<f64>() * 0.4) * std::f64::consts::PI / 180.0;
     let r_dir = Quat::from_axis_angle(h_hat, -nu).rotate(r_peri.normalized());
     let alt = ORBITAL_ALT_M + 2_500.0 * (rng.gen::<f64>() - 0.5);
     let probe = r_dir * (EARTH_RADIUS_EQ + alt);
@@ -162,7 +166,7 @@ fn spawn_leo(rng: &mut impl Rng) -> Spawn {
     });
 
     let r1 = r_ecef.norm();
-    let v_circ = (EARTH_MU / r1).sqrt();
+    let v_circ = sqrt(EARTH_MU / r1);
     let v_dir = h_hat.cross(r_ecef.normalized());
     let v_eci = v_dir * v_circ;
 

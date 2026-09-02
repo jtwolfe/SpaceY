@@ -184,6 +184,22 @@ impl Engine {
     }
 }
 
+/// Run a zero-residual LEO episode with the same `adaptive_dt` loop as
+/// `cargo test` / `Engine::fast_forward`. Used to measure native vs
+/// wasm32 skip drift (and to assert a documented seed lands in-browser).
+#[wasm_bindgen]
+pub fn run_leo_nominal(seed: u32, destroy: bool, wind_scale: f64, max_steps: u32) -> String {
+    use crate::sim::run_leo_nominal_snapshot;
+    serde_json::to_string(&run_leo_nominal_snapshot(seed, destroy, wind_scale, max_steps))
+        .unwrap_or_else(|_| "{}".into())
+}
+
+#[wasm_bindgen]
+pub fn run_leo_until(seed: u32, destroy: bool, wind_scale: f64, until_t: f64) -> String {
+    use crate::sim::run_leo_until as run;
+    serde_json::to_string(&run(seed, destroy, wind_scale, until_t)).unwrap_or_else(|_| "{}".into())
+}
+
 impl Default for Engine {
     fn default() -> Self {
         Self::new()
