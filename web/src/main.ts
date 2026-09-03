@@ -8,7 +8,32 @@ type WasmEngine = Engine & {
   generation_viz?: () => GenerationViz;
   set_autopilot?: (on: boolean) => void;
   autopilot?: () => boolean;
+  export_brain?: () => string;
+  import_brain?: (json: string) => boolean;
 };
+
+const BRAIN_KEY = "spacey-brain-v3";
+
+function persistBrain(engine: WasmEngine) {
+  try {
+    if (typeof engine.export_brain === "function") {
+      localStorage.setItem(BRAIN_KEY, engine.export_brain());
+    }
+  } catch {
+    /* quota / private mode */
+  }
+}
+
+function restoreBrain(engine: WasmEngine) {
+  try {
+    const raw = localStorage.getItem(BRAIN_KEY);
+    if (raw && typeof engine.import_brain === "function") {
+      engine.import_brain(raw);
+    }
+  } catch {
+    /* ignore */
+  }
+}
 
 function fromWasm<T>(v: T | Map<string, unknown>): T {
   if (v instanceof Map) return Object.fromEntries(v) as T;
@@ -47,6 +72,16 @@ function fmt(n: number, d = 1): string {
   return n.toLocaleString(undefined, { maximumFractionDigits: d, minimumFractionDigits: d });
 }
 
+function weatherNote(s: Snapshot): string {
+  const bits: string[] = [];
+  bits.push(`${fmt(s.wind_scale ?? 0, 1)}×`);
+  const dir = s.weather_dir_off ?? 0;
+  if (Math.abs(dir) >= 0.5) bits.push(`${dir >= 0 ? "+" : ""}${fmt(dir, 0)}°`);
+  if (s.weather_storm) bits.push("storm");
+  if (s.weather_shear) bits.push("shear");
+  return bits.join(" · ");
+}
+
 function landBoxNote(s: Snapshot): string {
   if (s.success) return "in box";
   if (!s.terminated) return "—";
@@ -56,7 +91,7 @@ function landBoxNote(s: Snapshot): string {
   if (s.speed >= 8) bits.push(`v ${fmt(s.speed, 1)} m/s`);
   if (vh >= 4) bits.push(`vh ${fmt(vh, 1)} m/s`);
   if (s.range_h >= 20) bits.push(`pad ${fmt(s.range_h, 0)} m`);
-  if (s.tilt_deg >= 12) bits.push(`tilt ${fmt(s.tilt_deg, 0)}°`);
+  if (s.tilt_deg >= 8) bits.push(`tilt ${fmt(s.tilt_deg, 0)}°`);
   return bits.join(" · ") || "—";
 }
 
@@ -93,6 +128,7 @@ function qClass(q: number): string | undefined {
 async function main() {
   await init();
   const engine = new Engine() as WasmEngine;
+  restoreBrain(engine);
   (window as unknown as { spacey: Engine }).spacey = engine;
   let scene: SceneApp | null = null;
   try {
@@ -112,8 +148,6 @@ async function main() {
   const dots = document.querySelector<HTMLElement>("#phase-dots")!;
   const status = document.querySelector("#mission-status")!;
   const btnTrain = document.querySelector("#btn-train")!;
-  const windSlider = document.querySelector<HTMLInputElement>("#rng-wind");
-  const windLabel = document.querySelector("#wind-val");
 
   let last = performance.now();
   let snap: Snapshot = readSnap(engine);
@@ -206,7 +240,7 @@ async function main() {
       ["Gimbal", `${fmt(((s.gimbal?.[0] ?? 0) * 180) / Math.PI, 1)}/${fmt(((s.gimbal?.[1] ?? 0) * 180) / Math.PI, 1)}°`],
       ["Tilt", `${fmt(s.tilt_deg, 1)}°`],
       ["Fins", `${finDeg[0]}/${finDeg[1]}/${finDeg[2]}°`],
-      ["RCS", s.pilot === "policy" ? "off" : fmt(s.rcs ?? 0, 2)],
+      ["RCS", fmt(s.rcs ?? 0, 2)],
     ]);
     const rho = s.density;
     const rhoStr =
@@ -230,7 +264,7 @@ async function main() {
       ["Obs", s.plane_lock ? "2D pad-ENU" : "6DOF pad-ENU"],
       ["v* slam", `${fmt(s.v_slam ?? 0, 1)} m/s`],
       ["Range", `${fmt(s.range_h / 1000, 2)} km`],
-      ["Weather", [s.weather_storm ? "storm" : null, s.weather_shear ? "shear" : null].filter(Boolean).join("+") || "fair"],
+      ["Weather", weatherNote(s)],
       ["Term", s.term || "—", s.success ? "good" : s.terminated ? "bad" : undefined],
       ["Box", landBoxNote(s), s.success ? "good" : s.terminated && !s.success ? "warn" : undefined],
       ["Breakup", s.destroy_reason || "—", s.destroy_reason ? "bad" : undefined],
@@ -250,14 +284,15 @@ async function main() {
     const lastImpact = t.last_impact ?? 0;
     const lastMiss = t.last_miss ?? 0;
     const plane = s.plane_lock ? "2D" : "6DOF";
+    const mix = (t.mix_left ?? 0) > 0
+      ? t.mix_hard_pad
+        ? " · mix windy pad"
+        : " · mix next"
+      : "";
     meta.textContent = t.running
-      ? `RTLS · train ${stageN}/${stageCount} ${stageLabel} (${plane})\nthis gen ${liveN}/${pop} · ${liveLands} true · ${liveImpact} impact · ${liveMiss} miss\nlast gen ${lastLands}/${pop} true (${landPct}%) · ${lastImpact} impact`
+      ? `RTLS · train ${stageN}/${stageCount} ${stageLabel} (${plane})${mix}\nthis gen ${liveN}/${pop} · ${liveLands} true · ${liveImpact} impact · ${liveMiss} miss\nlast gen ${lastLands}/${pop} true (${landPct}%) · ${lastImpact} impact`
       : `RTLS · train ${stageN}/${stageCount} ${stageLabel} (${plane})\ngen ${t.generation} · idle · ${t.episodes} episodes`;
     paintPhaseDots(dots, t);
-    if (windSlider && Number.isFinite(s.wind_scale) && Math.abs(Number(windSlider.value) - s.wind_scale) > 0.05) {
-      windSlider.value = String(s.wind_scale);
-      if (windLabel) windLabel.textContent = `${s.wind_scale.toFixed(1)}×`;
-    }
 
     paintSpark(t);
     const liveFits = viz?.live ? nums(viz.live.fitnesses) : [];
@@ -325,7 +360,7 @@ async function main() {
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
     if (engine.is_training()) {
-      engine.train_for_ms(12);
+      if (engine.train_for_ms(12)) persistBrain(engine);
     }
     engine.step_display(dt);
     snap = readSnap(engine);

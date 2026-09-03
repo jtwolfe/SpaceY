@@ -1,20 +1,24 @@
 //! CMA-NeuroES policy: a small tanh MLP that *is* the controller.
 //!
 //! Observations are pad-frame pose, velocity, body rate, and fuel. Actions
-//! are throttle, TVC gimbal, and grid fins. Zero weights keep engines off
-//! (deadband around tanh 0). No inner attitude PD, no RCS, no reference path.
+//! are throttle, TVC gimbal, grid fins, engine cluster, and RCS. Zero weights
+//! keep engines and RCS off (deadband around tanh 0). No inner attitude PD,
+//! no wind/q/Mach/phase inputs, no reference path.
 
 use crate::constants::*;
 use crate::guidance::{Controls, Nav};
-use crate::math::{clamp, saturate, tanh, Quat, Vec3};
-use crate::scenario::Scenario;
+use crate::math::{asinh, clamp, saturate, tanh, Quat, Vec3};
 
 pub const N_IN: usize = 14;
-pub const N_OUT: usize = 6;
+pub const N_OUT: usize = 10;
 pub const HIDDEN_START: usize = 8;
 pub const HIDDEN_MAX: usize = 24;
 /// Policy tick. Physics may run faster; the last action is held.
 pub const POLICY_DT: f64 = 0.10;
+/// asinh characteristic length — one scale for every curriculum stage.
+pub const OBS_POS_M: f64 = 400.0;
+pub const OBS_VEL_MPS: f64 = 80.0;
+pub const OBS_RATE_RAD_S: f64 = 1.0;
 
 /// Layout: W1 (H×N_IN) | b1 (H) | W2 (N_OUT×H) | b2 (N_OUT).
 pub fn n_weights(hidden: usize) -> usize {
@@ -102,24 +106,10 @@ pub fn expand_hidden(w: &[f64], h_old: usize) -> Vec<f64> {
     out
 }
 
-fn obs_scales(scenario: Scenario) -> (f64, f64, f64) {
-    match scenario {
-        Scenario::Pad => (120.0, 40.0, 1.0),
-        Scenario::Slam | Scenario::Attitude | Scenario::Wind => (500.0, 80.0, 1.2),
-        Scenario::Glide => (8_000.0, 200.0, 1.5),
-        Scenario::Rtls => (12_000.0, 400.0, 1.5),
-    }
-}
-
-/// Pad-ENU engine position, velocity, body→ENU quaternion, body rate, fuel.
+/// Pad-ENU engine position, velocity, body→ENU quaternion, body rate, and
+/// fuel / 40 t. asinh keeps pad and RTLS in the same linear-ish band.
 /// No q, Mach, AoA, phase, or predicted miss.
-pub fn observe(
-    nav: &Nav,
-    body_y_ecef: Vec3,
-    omega_body: Vec3,
-    scenario: Scenario,
-) -> [f64; N_IN] {
-    let (pos_s, vel_s, rate_s) = obs_scales(scenario);
+pub fn observe(nav: &Nav, body_y_ecef: Vec3, omega_body: Vec3) -> [f64; N_IN] {
     let bx = Vec3::new(
         nav.body_x_ecef.dot(nav.east),
         nav.body_x_ecef.dot(nav.north),
@@ -149,22 +139,21 @@ pub fn observe(
     };
     let q = Quat::from_axes(bx, by, bz).hemisphere();
     let engine = nav.pos_enu - bx * (STAGE_LENGTH_M * 0.5);
-    let fuel_s = scenario.start_fuel().max(1.0);
     [
-        engine.x / pos_s,
-        engine.y / pos_s,
-        nav.engine_alt / pos_s,
-        nav.v_enu.x / vel_s,
-        nav.v_enu.y / vel_s,
-        nav.v_enu.z / vel_s,
+        asinh(engine.x / OBS_POS_M),
+        asinh(engine.y / OBS_POS_M),
+        asinh(nav.engine_alt / OBS_POS_M),
+        asinh(nav.v_enu.x / OBS_VEL_MPS),
+        asinh(nav.v_enu.y / OBS_VEL_MPS),
+        asinh(nav.v_enu.z / OBS_VEL_MPS),
         q.w,
         q.x,
         q.y,
         q.z,
-        omega_body.x / rate_s,
-        omega_body.y / rate_s,
-        omega_body.z / rate_s,
-        nav.fuel / fuel_s,
+        asinh(omega_body.x / OBS_RATE_RAD_S),
+        asinh(omega_body.y / OBS_RATE_RAD_S),
+        asinh(omega_body.z / OBS_RATE_RAD_S),
+        (nav.fuel / START_FUEL_KG).clamp(0.0, 2.0),
     ]
 }
 
@@ -172,17 +161,27 @@ pub fn actions_from_mlp(y: &[f64; N_OUT], plane_lock: bool) -> Controls {
     let mut u = Controls::default();
     if y[0] > 0.08 {
         u.throttle = saturate(THROTTLE_MIN + (y[0] - 0.08) / 0.92 * (THROTTLE_MAX - THROTTLE_MIN));
-        u.n_engines = N_ENGINES_LANDING;
+        u.n_engines = if y[6] > 0.20 {
+            N_ENGINES_ENTRY
+        } else {
+            N_ENGINES_LANDING
+        };
     }
     u.gimbal_y = clamp(y[1] * GIMBAL_MAX_RAD, -GIMBAL_MAX_RAD, GIMBAL_MAX_RAD);
     u.gimbal_z = clamp(y[2] * GIMBAL_MAX_RAD, -GIMBAL_MAX_RAD, GIMBAL_MAX_RAD);
     u.fin_pitch = clamp(y[3] * FIN_MAX_DEFLECT_RAD, -FIN_MAX_DEFLECT_RAD, FIN_MAX_DEFLECT_RAD);
     u.fin_yaw = clamp(y[4] * FIN_MAX_DEFLECT_RAD, -FIN_MAX_DEFLECT_RAD, FIN_MAX_DEFLECT_RAD);
     u.fin_roll = clamp(y[5] * FIN_MAX_DEFLECT_RAD, -FIN_MAX_DEFLECT_RAD, FIN_MAX_DEFLECT_RAD);
+    u.rcs_x = clamp(y[7], -1.0, 1.0);
+    u.rcs_y = clamp(y[8], -1.0, 1.0);
+    u.rcs_z = clamp(y[9], -1.0, 1.0);
     if plane_lock {
         u.gimbal_z = 0.0;
         u.fin_yaw = 0.0;
         u.fin_roll = 0.0;
+        u.rcs_x = 0.0;
+        u.rcs_y = 0.0;
+        u.rcs_z = 0.0;
     }
     u
 }
@@ -193,12 +192,13 @@ mod tests {
     use crate::earth::pad_ecef;
     use crate::guidance::nav_from;
     use crate::math::Vec3;
+    use crate::scenario::Scenario;
 
     #[test]
     fn weight_count_matches_layout() {
-        assert_eq!(n_weights(8), 8 * 14 + 8 + 6 * 8 + 6);
-        assert_eq!(n_weights(8), 174);
-        assert_eq!(hidden_from_len(174), 8);
+        assert_eq!(n_weights(8), 8 * 14 + 8 + 10 * 8 + 10);
+        assert_eq!(n_weights(8), 210);
+        assert_eq!(hidden_from_len(210), 8);
         assert_eq!(hidden_from_len(n_weights(16)), 16);
     }
 
@@ -212,14 +212,29 @@ mod tests {
         assert_eq!(u.throttle, 0.0);
         assert_eq!(u.gimbal_y, 0.0);
         assert_eq!(u.gimbal_z, 0.0);
+        assert_eq!(u.rcs_x, 0.0);
+        assert_eq!(u.rcs_y, 0.0);
+        assert_eq!(u.rcs_z, 0.0);
         for v in y {
             assert!(v.abs() < 1e-12);
         }
     }
 
     #[test]
+    fn cluster_output_selects_three() {
+        let mut y = [0.0; N_OUT];
+        y[0] = 0.5;
+        y[6] = 0.5;
+        let u = actions_from_mlp(&y, false);
+        assert_eq!(u.n_engines, 3);
+        y[6] = 0.0;
+        let u1 = actions_from_mlp(&y, false);
+        assert_eq!(u1.n_engines, 1);
+    }
+
+    #[test]
     fn plane_lock_zeros_out_of_plane_actuators() {
-        let y = [0.5, 0.4, 0.9, 0.3, 0.8, -0.7];
+        let y = [0.5, 0.4, 0.9, 0.3, 0.8, -0.7, 0.0, 0.9, 0.4, -0.8];
         let u = actions_from_mlp(&y, true);
         assert!(u.throttle > 0.3);
         assert_eq!(u.n_engines, 1);
@@ -228,6 +243,9 @@ mod tests {
         assert_eq!(u.fin_yaw, 0.0);
         assert_eq!(u.fin_roll, 0.0);
         assert!(u.fin_pitch.abs() > 0.01);
+        assert_eq!(u.rcs_x, 0.0);
+        assert_eq!(u.rcs_y, 0.0);
+        assert_eq!(u.rcs_z, 0.0);
     }
 
     #[test]
@@ -258,11 +276,43 @@ mod tests {
         };
         let y = Vec3::Y;
         let w = Vec3::ZERO;
-        let a = observe(&n0, y, w, Scenario::Pad);
-        let b = observe(&n1, y, w, Scenario::Pad);
+        let a = observe(&n0, y, w);
+        let b = observe(&n1, y, w);
         for i in 0..N_IN {
             assert!((a[i] - b[i]).abs() < 1e-12, "feat {i}");
         }
+    }
+
+    #[test]
+    fn asinh_obs_has_pad_slope_and_rtls_bound() {
+        let pad = pad_ecef();
+        let mut near = nav_from(
+            pad + Vec3::new(0.0, 0.0, 80.0),
+            Vec3::ZERO,
+            Vec3::Z,
+            80.0,
+            80.0,
+            0.0,
+            0.0,
+            0.0,
+            1_000.0,
+            wet_mass(1_000.0),
+        );
+        near.east = Vec3::X;
+        near.north = Vec3::Y;
+        near.up = Vec3::Z;
+        near.body_x_ecef = Vec3::Z;
+        near.pos_enu = Vec3::new(0.0, 0.0, 80.0);
+        near.engine_alt = 80.0;
+        let a = observe(&near, Vec3::Y, Vec3::ZERO);
+        let mut far = near;
+        far.engine_alt = 80_000.0;
+        far.pos_enu.z = 80_000.0;
+        let b = observe(&far, Vec3::Y, Vec3::ZERO);
+        assert!(a[2].abs() > 0.05, "pad alt should have slope {}", a[2]);
+        assert!(b[2].abs() < 8.0, "RTLS alt should stay bounded {}", b[2]);
+        assert!(b[2].abs() > a[2].abs() + 1.0);
+        let _ = Scenario::Rtls;
     }
 
     #[test]

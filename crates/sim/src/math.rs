@@ -359,6 +359,10 @@ pub fn sqrt(x: f64) -> f64 {
 pub fn tanh(x: f64) -> f64 {
     libm::tanh(x)
 }
+#[inline]
+pub fn asinh(x: f64) -> f64 {
+    libm::asinh(x)
+}
 
 #[cfg(test)]
 mod tests {

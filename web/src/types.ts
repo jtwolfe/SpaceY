@@ -55,6 +55,7 @@ export type Snapshot = {
   plane_lock?: boolean;
   lights?: number;
   relights?: number;
+  weather_dir_off?: number;
 };
 
 export type PackedTrails = {
@@ -99,6 +100,8 @@ export type TrainInfo = {
   land_rate?: number;
   promote_ready?: boolean;
   promote_to?: number;
+  mix_left?: number;
+  mix_hard_pad?: boolean;
   stage?: string;
   stage_n?: number;
   stage_count?: number;

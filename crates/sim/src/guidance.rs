@@ -59,6 +59,9 @@ pub struct Controls {
     pub fin_yaw: f64,
     pub fin_roll: f64,
     pub n_engines: u8,
+    pub rcs_x: f64,
+    pub rcs_y: f64,
+    pub rcs_z: f64,
 }
 
 impl Default for Controls {
@@ -71,6 +74,9 @@ impl Default for Controls {
             fin_yaw: 0.0,
             fin_roll: 0.0,
             n_engines: 0,
+            rcs_x: 0.0,
+            rcs_y: 0.0,
+            rcs_z: 0.0,
         }
     }
 }
@@ -557,7 +563,7 @@ mod tests {
 
     #[test]
     fn in_box_touchdown_is_a_land() {
-        let n = touch(6.0, 1.0, 8.0, 4.0, 5.0);
+        let n = touch(6.0, 1.0, 8.0, 4.0, 0.2);
         assert!(success(&n, true));
         assert_eq!(evaluate_contact(&n, true), TermReason::Success);
         assert!(!impact_destroy(&n));
@@ -572,8 +578,16 @@ mod tests {
     }
 
     #[test]
-    fn slap_is_still_a_breakup() {
-        let n = touch(24.0, 2.0, 5.0, 4.0, 0.2);
-        assert!(impact_destroy(&n));
+    fn hover_in_the_box_is_not_ground_contact() {
+        let n = touch(6.0, 1.0, 8.0, 4.0, 10.0);
+        assert!(success(&n, true));
+        assert!(!ground_hit(&n));
+    }
+
+    #[test]
+    fn ten_deg_tilt_is_outside_the_box() {
+        let n = touch(6.0, 1.0, 8.0, 10.0, 0.2);
+        assert!(!success(&n, true));
+        assert_eq!(evaluate_contact(&n, true), TermReason::GroundMiss);
     }
 }

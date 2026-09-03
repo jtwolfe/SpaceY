@@ -113,8 +113,13 @@ impl Scenario {
     }
 
     pub fn spawn(self, rng: &mut impl Rng) -> Spawn {
+        self.spawn_var(rng, false)
+    }
+
+    /// `hard_pad` lowers the pad start and is ignored on later stages.
+    pub fn spawn_var(self, rng: &mut impl Rng, hard_pad: bool) -> Spawn {
         match self {
-            Scenario::Pad => spawn_pad(rng),
+            Scenario::Pad => spawn_pad(rng, hard_pad),
             Scenario::Slam => spawn_slam_2d(rng),
             Scenario::Attitude | Scenario::Wind => spawn_slam_6dof(rng),
             Scenario::Glide => spawn_glide(rng),
@@ -128,6 +133,7 @@ pub struct Spawn {
     pub r_eci: Vec3,
     pub v_eci: Vec3,
     pub q_body_to_eci: Quat,
+    pub omega_body: Vec3,
     pub fuel: f64,
     pub start_ecef: Vec3,
 }
@@ -189,15 +195,21 @@ fn spawn_upright(
         r_eci: r_ecef,
         v_eci,
         q_body_to_eci: q,
+        omega_body: Vec3::ZERO,
         fuel,
         start_ecef: r_ecef,
     }
 }
 
-fn spawn_pad(rng: &mut impl Rng) -> Spawn {
-    let alt = 82.0 + 8.0 * (rng.gen::<f64>() - 0.5);
+fn spawn_pad(rng: &mut impl Rng, hard: bool) -> Spawn {
+    // Easy: ~250 m so a 2.5 s latch is schedulable. Hard mix: ~120 m.
+    let alt = if hard {
+        120.0 + 25.0 * (rng.gen::<f64>() - 0.5)
+    } else {
+        250.0 + 40.0 * (rng.gen::<f64>() - 0.5)
+    };
     let vx = 1.5 * (rng.gen::<f64>() - 0.5);
-    let vz = -1.5 * rng.gen::<f64>();
+    let vz = -(14.0 + 8.0 * rng.gen::<f64>());
     let e = 6.0 * (rng.gen::<f64>() - 0.5);
     spawn_upright(rng, alt, Vec3::new(vx, 0.0, vz), e, 0.0, HOVER_FUEL_KG, true)
 }
@@ -225,7 +237,7 @@ fn spawn_slam_6dof(rng: &mut impl Rng) -> Spawn {
     let vz = -(40.0 + 80.0 * rng.gen::<f64>());
     let e = 200.0 * (rng.gen::<f64>() - 0.5);
     let n = 200.0 * (rng.gen::<f64>() - 0.5);
-    spawn_upright(
+    let mut s = spawn_upright(
         rng,
         alt,
         Vec3::new(vx, vy, vz),
@@ -233,22 +245,35 @@ fn spawn_slam_6dof(rng: &mut impl Rng) -> Spawn {
         n,
         SUICIDE_FUEL_KG,
         false,
-    )
+    );
+    let pad = pad_geodetic();
+    let (east, north, _up) = enu_basis(pad.lat, pad.lon);
+    let tilt = (5.0 + 10.0 * rng.gen::<f64>()) * std::f64::consts::PI / 180.0;
+    let az = rng.gen::<f64>() * 2.0 * std::f64::consts::PI;
+    let axis = (east * cos(az) + north * sin(az)).normalized();
+    s.q_body_to_eci = Quat::from_axis_angle(axis, tilt).mul(s.q_body_to_eci);
+    s.omega_body = Vec3::new(
+        0.04 * (rng.gen::<f64>() - 0.5),
+        0.10 * (rng.gen::<f64>() - 0.5),
+        0.10 * (rng.gen::<f64>() - 0.5),
+    );
+    s
 }
 
 fn spawn_glide(rng: &mut impl Rng) -> Spawn {
     let pad = pad_geodetic();
-    let dlon = 11_000.0 / (EARTH_RADIUS_EQ * cos(pad.lat).max(0.3));
+    let downrange = 11_000.0 + 3_000.0 * (rng.gen::<f64>() - 0.5);
+    let dlon = downrange / (EARTH_RADIUS_EQ * cos(pad.lat).max(0.3));
     let geo = Geodetic {
-        lat: pad.lat + 0.0003 * (rng.gen::<f64>() - 0.5),
-        lon: pad.lon + dlon + 0.0004 * (rng.gen::<f64>() - 0.5),
+        lat: pad.lat + 0.0008 * (rng.gen::<f64>() - 0.5),
+        lon: pad.lon + dlon + 0.0008 * (rng.gen::<f64>() - 0.5),
         alt: 20_500.0 + 400.0 * (rng.gen::<f64>() - 0.5),
     };
     let r_ecef = geodetic_to_ecef(geo);
     let (east, north, up) = enu_basis(geo.lat, geo.lon);
     let speed = 380.0 + 20.0 * (rng.gen::<f64>() - 0.5);
     let gamma = (-9.0 + rng.gen::<f64>() * 1.2) * std::f64::consts::PI / 180.0;
-    let heading = (268.5 + rng.gen::<f64>() * 2.0) * std::f64::consts::PI / 180.0;
+    let heading = (268.5 + (rng.gen::<f64>() * 2.0 - 1.0) * 8.0) * std::f64::consts::PI / 180.0;
     let vh = speed * cos(gamma);
     let vu = speed * sin(gamma);
     let v_enu = Vec3::new(vh * sin(heading), vh * cos(heading), vu);
@@ -265,6 +290,7 @@ fn spawn_glide(rng: &mut impl Rng) -> Spawn {
         r_eci: r_ecef,
         v_eci,
         q_body_to_eci: q,
+        omega_body: Vec3::ZERO,
         fuel: GLIDE_FUEL_KG,
         start_ecef: r_ecef,
     }
@@ -273,10 +299,11 @@ fn spawn_glide(rng: &mut impl Rng) -> Spawn {
 /// ~80 km, ~2.05 km/s Earth-relative, westbound toward LZ-1.
 fn spawn_rtls(rng: &mut impl Rng) -> Spawn {
     let pad = pad_geodetic();
-    let dlon = 62_000.0 / (EARTH_RADIUS_EQ * cos(pad.lat));
-    let jitter = 0.0008 * (rng.gen::<f64>() - 0.5);
+    let downrange = 62_000.0 + 8_000.0 * (rng.gen::<f64>() - 0.5);
+    let dlon = downrange / (EARTH_RADIUS_EQ * cos(pad.lat));
+    let jitter = 0.0012 * (rng.gen::<f64>() - 0.5);
     let geo = Geodetic {
-        lat: pad.lat + 0.0004 * (rng.gen::<f64>() - 0.5),
+        lat: pad.lat + 0.0008 * (rng.gen::<f64>() - 0.5),
         lon: pad.lon + dlon + jitter,
         alt: 80_000.0 + 1_500.0 * (rng.gen::<f64>() - 0.5),
     };
@@ -284,7 +311,7 @@ fn spawn_rtls(rng: &mut impl Rng) -> Spawn {
     let (east, north, up) = enu_basis(geo.lat, geo.lon);
     let speed = 2_050.0 + 60.0 * (rng.gen::<f64>() - 0.5);
     let gamma = (-7.5 + rng.gen::<f64>() * 0.8) * std::f64::consts::PI / 180.0;
-    let heading = (269.2 + rng.gen::<f64>() * 1.2) * std::f64::consts::PI / 180.0;
+    let heading = (269.2 + (rng.gen::<f64>() * 2.0 - 1.0) * 4.0) * std::f64::consts::PI / 180.0;
     let vh = speed * cos(gamma);
     let vu = speed * sin(gamma);
     let v_enu = Vec3::new(vh * sin(heading), vh * cos(heading), vu);
@@ -301,6 +328,7 @@ fn spawn_rtls(rng: &mut impl Rng) -> Spawn {
         r_eci: r_ecef,
         v_eci,
         q_body_to_eci: q,
+        omega_body: Vec3::ZERO,
         fuel: START_FUEL_KG,
         start_ecef: r_ecef,
     }
@@ -343,9 +371,35 @@ mod tests {
         let geo = crate::earth::ecef_to_geodetic(s.r_eci);
         let pad = crate::earth::pad_ecef();
         let range = crate::earth::great_circle_m(s.r_eci, pad);
-        assert!(geo.alt > 90.0 && geo.alt < 140.0, "alt {}", geo.alt);
+        assert!(geo.alt > 220.0 && geo.alt < 330.0, "alt {}", geo.alt);
         assert!(range < 80.0, "range {range}");
         assert!((s.fuel - HOVER_FUEL_KG).abs() < 1.0);
+        let hard = Scenario::Pad.spawn_var(&mut rng, true);
+        let hard_alt = crate::earth::ecef_to_geodetic(hard.r_eci).alt;
+        assert!(hard_alt > 90.0 && hard_alt < 180.0, "hard alt {hard_alt}");
+        assert!(hard_alt < geo.alt - 40.0);
+        let (_, v_g) = crate::earth::eci_vel_to_ecef_ground(s.r_eci, s.v_eci, 0.0);
+        let padg = crate::earth::pad_geodetic();
+        let (_, _, up) = crate::earth::enu_basis(padg.lat, padg.lon);
+        let v_up = v_g.dot(up);
+        assert!(v_up < -10.0, "pad should start descending, v_up {v_up}");
+    }
+
+    #[test]
+    fn attitude_spawn_starts_tilted() {
+        let mut rng = SmallRng::seed_from_u64(5);
+        let s = Scenario::Attitude.spawn(&mut rng);
+        let geo = crate::earth::ecef_to_geodetic(s.r_eci);
+        let (_, _, up) = crate::earth::enu_basis(geo.lat, geo.lon);
+        let body_x = s.q_body_to_eci.rotate(Vec3::X);
+        let tilt = body_x.normalized().dot(up.normalized()).clamp(-1.0, 1.0).acos();
+        assert!(
+            tilt > 4.0 * std::f64::consts::PI / 180.0
+                && tilt < 16.0 * std::f64::consts::PI / 180.0,
+            "tilt {}",
+            tilt.to_degrees()
+        );
+        assert!(s.omega_body.norm() > 1e-4);
     }
 
     #[test]

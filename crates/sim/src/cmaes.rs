@@ -8,11 +8,11 @@ use crate::math::{cos, exp, ln, sqrt};
 use crate::policy::{expand_hidden, n_weights, HIDDEN_MAX, HIDDEN_START};
 use crate::scenario::{Scenario, STAGE_COUNT};
 use crate::sim::{run_episode_traced, EpisodeTrace};
-use crate::wind::Weather;
+use crate::wind::{sample_weather_var, Weather};
 use rand::rngs::SmallRng;
 use rand::Rng;
 use rand::SeedableRng;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub const LAMBDA: usize = 128;
 pub const MU: usize = 32;
@@ -48,6 +48,8 @@ pub struct TrainInfo {
     pub land_rate: f64,
     pub promote_ready: bool,
     pub promote_to: i32,
+    pub mix_left: u32,
+    pub mix_hard_pad: bool,
     pub stage: String,
     pub stage_n: u32,
     pub stage_count: u32,
@@ -160,6 +162,11 @@ pub struct Trainer {
     land_streak: u32,
     promote_ready: bool,
     promoted: bool,
+    pub pin_storm: bool,
+    pub pin_shear: bool,
+    mix_left: u32,
+    mix_next: Option<Scenario>,
+    mix_hard_pad: bool,
 }
 
 impl Trainer {
@@ -215,6 +222,11 @@ impl Trainer {
             land_streak: 0,
             promote_ready: false,
             promoted: false,
+            pin_storm: false,
+            pin_shear: false,
+            mix_left: 0,
+            mix_next: None,
+            mix_hard_pad: false,
         }
     }
 
@@ -224,6 +236,10 @@ impl Trainer {
 
     pub fn hidden(&self) -> usize {
         self.hidden
+    }
+
+    pub fn mix_hard_pad(&self) -> bool {
+        self.mix_hard_pad && self.mix_left > 0
     }
 
     fn dim(&self) -> usize {
@@ -238,6 +254,9 @@ impl Trainer {
         self.land_streak = 0;
         self.promote_ready = false;
         self.promoted = false;
+        self.mix_left = 0;
+        self.mix_next = None;
+        self.mix_hard_pad = false;
         let n = n_weights(self.hidden);
         self.running = false;
         self.generation = 0;
@@ -298,20 +317,22 @@ impl Trainer {
         self.gens_since_best = 0;
         self.land_streak = 0;
         self.promote_ready = false;
+        self.mix_left = 0;
+        self.mix_next = None;
+        self.mix_hard_pad = false;
         if running {
             self.sample_generation();
         }
     }
 
     /// Advance one training stage, keep champion weights, reset covariance.
-    fn try_promote(&mut self) -> bool {
-        if !self.promote_ready {
-            return false;
-        }
-        let Some(next) = self.scenario.next_gate() else {
+    fn commit_promote(&mut self) -> bool {
+        let Some(next) = self.mix_next.take() else {
             self.promote_ready = false;
             return false;
         };
+        self.mix_left = 0;
+        self.mix_hard_pad = false;
         self.scenario = next;
         if next == Scenario::Wind && self.wind_scale < 0.4 {
             self.wind_scale = 1.0;
@@ -380,19 +401,37 @@ impl Trainer {
                 .wrapping_add(self.generation * 17)
                 .wrapping_add(self.eval_index as u32 * 31)
                 .wrapping_add(self.rng.gen::<u32>() % 8);
-            let wind = if self.scenario.domain_rand_wind() {
-                self.wind_scale.max(0.65) * (0.5 + self.rng.gen::<f64>())
+            let pad_harden = self.mix_hard_pad && self.mix_left > 0;
+            let hard_pad = pad_harden && self.rng.gen::<bool>();
+            let ep_scen = if pad_harden {
+                self.scenario
+            } else if self.mix_left > 0 {
+                if self.rng.gen::<bool>() {
+                    self.scenario
+                } else {
+                    self.mix_next.unwrap_or(self.scenario)
+                }
             } else {
-                self.wind_scale
+                self.scenario
             };
+            let (wx, wind) = sample_weather_var(
+                ep_scen,
+                self.wind_scale.max(0.0),
+                self.pin_storm,
+                self.pin_shear,
+                hard_pad,
+                &mut self.rng,
+            );
+            self.weather = wx;
             let tr = run_episode_traced(
                 &self.pending[self.eval_index],
                 seed,
                 self.destroy,
                 wind,
-                self.scenario,
-                self.weather,
+                ep_scen,
+                wx,
                 true,
+                hard_pad,
             );
             self.pending_f[self.eval_index] = Some((tr.fitness, tr.term));
             self.live_paths.push(tr);
@@ -445,16 +484,25 @@ impl Trainer {
             .iter()
             .filter(|p| matches!(p, Some((_, TermReason::Success))))
             .count() as u32;
-        let land_frac = self.last_successes as f64 / LAMBDA as f64;
-        if land_frac + 1e-9 >= 0.30 {
-            self.land_streak = self.land_streak.saturating_add(1);
-        } else {
-            self.land_streak = 0;
-            self.promote_ready = false;
+        let was_mixing = self.mix_left > 0;
+        if !was_mixing {
+            let land_frac = self.last_successes as f64 / LAMBDA as f64;
+            if land_frac + 1e-9 >= 0.30 {
+                self.land_streak = self.land_streak.saturating_add(1);
+            } else {
+                self.land_streak = 0;
+                self.promote_ready = false;
+            }
+            if self.land_streak >= 3 {
+                if let Some(next) = self.scenario.next_gate() {
+                    self.promote_ready = true;
+                    self.mix_next = Some(next);
+                    self.mix_left = 2;
+                    self.mix_hard_pad = self.scenario == Scenario::Pad;
+                }
+            }
         }
-        if self.land_streak >= 3 && self.scenario.next_gate().is_some() {
-            self.promote_ready = true;
-        }
+        let opened_mix = !was_mixing && self.mix_left > 0;
 
         let best = self.last_fitnesses[0];
         if best > self.best_ever {
@@ -531,11 +579,26 @@ impl Trainer {
         }
         if let Some(l) = cholesky(&self.c, n) {
             self.l = l;
+        } else {
+            self.c = identity(n);
+            for i in 0..n {
+                self.c[i * n + i] = 1e-6;
+            }
+            self.l = cholesky(&self.c, n).unwrap_or_else(|| identity(n));
         }
 
         self.generation += 1;
         self.maybe_grow();
-        if !self.try_promote() {
+        if opened_mix {
+            self.sample_generation();
+        } else if was_mixing {
+            self.mix_left = self.mix_left.saturating_sub(1);
+            if self.mix_left == 0 {
+                self.commit_promote();
+            } else {
+                self.sample_generation();
+            }
+        } else {
             self.sample_generation();
         }
     }
@@ -562,7 +625,6 @@ impl Trainer {
         self.sigma = (self.sigma * 1.35).clamp(0.10, 0.40);
         self.gens_since_best = 0;
         self.growths += 1;
-        self.improved_best = true;
     }
 
     pub fn info(&self) -> TrainInfo {
@@ -614,6 +676,8 @@ impl Trainer {
                 .next_gate()
                 .map(|s| s.id() as i32)
                 .unwrap_or(-1),
+            mix_left: self.mix_left,
+            mix_hard_pad: self.mix_hard_pad,
             stage: self.scenario.as_str().to_string(),
             stage_n: self.scenario.id() + 1,
             stage_count: STAGE_COUNT,
@@ -626,6 +690,71 @@ impl Trainer {
             last_miss: count_term_str(&self.last_terms, TermReason::GroundMiss.as_str()),
         }
     }
+
+    pub fn export_brain(&self) -> String {
+        let blob = BrainBlob {
+            v: 1,
+            weights: self.best_weights.clone(),
+            mean: self.mean.clone(),
+            hidden: self.hidden as u32,
+            stage: self.scenario.id(),
+            generation: self.generation,
+            best_ever: if self.best_ever.is_finite() {
+                self.best_ever
+            } else {
+                0.0
+            },
+            sigma: self.sigma,
+        };
+        serde_json::to_string(&blob).unwrap_or_else(|_| "{}".into())
+    }
+
+    pub fn import_brain(&mut self, json: &str) -> bool {
+        let Ok(blob) = serde_json::from_str::<BrainBlob>(json) else {
+            return false;
+        };
+        if blob.v != 1 {
+            return false;
+        }
+        let hidden = (blob.hidden as usize).clamp(HIDDEN_START, HIDDEN_MAX);
+        let n = n_weights(hidden);
+        if blob.weights.len() != n || blob.mean.len() != n {
+            return false;
+        }
+        self.hidden = hidden;
+        self.best_weights = blob.weights;
+        self.mean = blob.mean;
+        self.scenario = Scenario::from_id(blob.stage);
+        self.generation = blob.generation;
+        self.best_ever = blob.best_ever;
+        self.sigma = blob.sigma.clamp(0.02, 1.4);
+        self.c = identity(n);
+        self.l = identity(n);
+        self.pc = vec![0.0; n];
+        self.ps = vec![0.0; n];
+        self.mix_left = 0;
+        self.mix_next = None;
+        self.mix_hard_pad = false;
+        self.promote_ready = false;
+        self.pending.clear();
+        self.pending_z.clear();
+        self.pending_y.clear();
+        self.pending_f.clear();
+        self.eval_index = 0;
+        true
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct BrainBlob {
+    v: u32,
+    weights: Vec<f64>,
+    mean: Vec<f64>,
+    hidden: u32,
+    stage: u32,
+    generation: u32,
+    best_ever: f64,
+    sigma: f64,
 }
 
 fn count_term_paths(paths: &[EpisodeTrace], want: TermReason) -> u32 {
@@ -765,5 +894,19 @@ mod tests {
         assert!((t.mean[0] - 0.42).abs() < 1e-12);
         assert!((t.best_weights[0] - 0.42).abs() < 1e-12);
         assert!(!t.promote_ready);
+    }
+
+    #[test]
+    fn import_brain_roundtrip() {
+        let mut t = Trainer::new(1, true, 1.0);
+        t.best_weights[0] = 0.31;
+        t.mean[0] = 0.31;
+        t.generation = 4;
+        let json = t.export_brain();
+        let mut u = Trainer::new(2, true, 1.0);
+        assert!(u.import_brain(&json));
+        assert!((u.best_weights[0] - 0.31).abs() < 1e-12);
+        assert_eq!(u.generation, 4);
+        assert!(!u.import_brain("{}"));
     }
 }

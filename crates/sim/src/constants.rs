@@ -57,6 +57,9 @@ pub const N_ENGINES_LANDING: u8 = 1;
 pub const THROTTLE_MIN: f64 = 0.40; // Merlin 1D deep-throttle ballpark
 pub const THROTTLE_MAX: f64 = 1.00;
 pub const GIMBAL_MAX_RAD: f64 = 5.0 * std::f64::consts::PI / 180.0;
+/// Plant slew so a 10 Hz hold cannot teleport TVC / lattices.
+pub const GIMBAL_SLEW_RAD_S: f64 = 25.0 * std::f64::consts::PI / 180.0;
+pub const FIN_SLEW_RAD_S: f64 = 40.0 * std::f64::consts::PI / 180.0;
 /// Once lit, a Merlin cannot chatter off at the 10 Hz policy tick.
 pub const ENGINE_MIN_BURN_S: f64 = 2.5;
 /// Shutdown → restart delay. PWM-by-relight is not a throttle.
@@ -103,7 +106,7 @@ pub const SUCCESS_ENGINE_ALT_M: f64 = 12.0;
 pub const SUCCESS_SPEED_MPS: f64 = 8.0;
 pub const SUCCESS_HVEL_MPS: f64 = 4.0;
 pub const SUCCESS_PAD_OFFSET_M: f64 = 20.0;
-pub const SUCCESS_TILT_RAD: f64 = 12.0 * std::f64::consts::PI / 180.0;
+pub const SUCCESS_TILT_RAD: f64 = 8.0 * std::f64::consts::PI / 180.0;
 /// Structural slap. Hotter than the success box, still well below a 26 m/s RUD.
 /// A 10 m/s pad sit-down is a miss, not an explosion — otherwise CMA treats
 /// every near-land as a fireball.

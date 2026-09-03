@@ -319,6 +319,19 @@ pub fn check_destruction_limits(
     DestroyReason::None
 }
 
+/// Policy-owned RCS: commanded body accel in [-1, 1], Q-fade, no inner PD.
+pub fn rcs_commanded(cmd: Vec3, inertia: Vec3, q: f64) -> Vec3 {
+    let blend = (1.0 - q / RCS_Q_HANDOFF_PA).clamp(0.0, 1.0);
+    if blend < 1e-4 {
+        return Vec3::ZERO;
+    }
+    Vec3::new(
+        inertia.x * RCS_ANG_ACCEL * clamp(cmd.x, -1.0, 1.0),
+        inertia.y * RCS_ANG_ACCEL * clamp(cmd.y, -1.0, 1.0),
+        inertia.z * RCS_ANG_ACCEL * clamp(cmd.z, -1.0, 1.0),
+    ) * blend
+}
+
 /// Cold-gas RCS moment in the body frame. Authority fades as dynamic
 /// pressure comes up so grid fins own the atmosphere.
 pub fn rcs_moment(omega: Vec3, err_body: Vec3, inertia: Vec3, q: f64) -> Vec3 {
@@ -483,5 +496,17 @@ mod tests {
         assert_eq!(n, 1);
         assert_eq!(g.lights, 1);
         assert_eq!(g.relights, 0);
+    }
+
+    #[test]
+    fn cluster_change_while_lit_is_not_a_relight() {
+        let mut g = EngineGate::default();
+        let (_, n1) = g.apply(0.0, 0.70, 1);
+        assert_eq!(n1, 1);
+        let (_, n3) = g.apply(0.2, 0.80, 3);
+        assert_eq!(n3, 3);
+        assert_eq!(g.lights, 1);
+        assert_eq!(g.relights, 0);
+        assert!(g.on);
     }
 }

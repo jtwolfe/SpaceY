@@ -4,7 +4,9 @@ use crate::cmaes::Trainer;
 use crate::policy::n_weights;
 use crate::scenario::Scenario;
 use crate::sim::{Pilot, Sim};
-use crate::wind::Weather;
+use crate::wind::{sample_weather_var, Weather};
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -15,7 +17,8 @@ pub struct Engine {
     destroy: bool,
     wind_scale: f64,
     scenario: Scenario,
-    weather: Weather,
+    pin_storm: bool,
+    pin_shear: bool,
     seed: u32,
     watch_best: bool,
     autopilot: bool,
@@ -27,10 +30,10 @@ impl Engine {
     pub fn new() -> Engine {
         let seed = 7;
         let destroy = true;
-        let wind_scale = 0.0;
+        let wind_scale = 1.0;
         let scenario = Scenario::Pad;
         let weather = Weather::default();
-        let mut display = Sim::new_with(seed, destroy, wind_scale, scenario, weather);
+        let mut display = Sim::new_with(seed, destroy, 0.12, scenario, weather);
         display.pilot = Pilot::Policy;
         let mut trainer = Trainer::new(seed.wrapping_add(99), destroy, wind_scale);
         trainer.scenario = scenario;
@@ -41,7 +44,8 @@ impl Engine {
             destroy,
             wind_scale,
             scenario,
-            weather,
+            pin_storm: false,
+            pin_shear: false,
             seed,
             watch_best: true,
             autopilot: false,
@@ -56,13 +60,46 @@ impl Engine {
         }
     }
 
+    fn episode_weather(&self, seed: u32) -> (Weather, f64, bool) {
+        let scen = self.display_scenario();
+        let hard_pad = self.trainer.mix_hard_pad() && (seed & 1) == 1;
+        if self.trainer.running && !self.autopilot {
+            let mut rng = StdRng::seed_from_u64(seed as u64 + 91);
+            let (wx, scale) = sample_weather_var(
+                scen,
+                self.wind_scale,
+                self.pin_storm,
+                self.pin_shear,
+                hard_pad,
+                &mut rng,
+            );
+            (wx, scale, hard_pad)
+        } else {
+            (
+                Weather {
+                    storm: self.pin_storm,
+                    shear: self.pin_shear,
+                    dir_off_deg: 0.0,
+                },
+                if scen == Scenario::Pad {
+                    (self.wind_scale * 0.12).clamp(0.0, 0.25)
+                } else {
+                    self.wind_scale
+                },
+                false,
+            )
+        }
+    }
+
     fn rebuild_display(&mut self, seed: u32) {
-        let mut sim = Sim::new_with(
+        let (wx, scale, hard_pad) = self.episode_weather(seed);
+        let mut sim = Sim::new_with_opts(
             seed,
             self.destroy,
-            self.wind_scale,
+            scale,
             self.display_scenario(),
-            self.weather,
+            wx,
+            hard_pad,
         );
         sim.pilot = if self.autopilot {
             Pilot::Autopilot
@@ -89,8 +126,6 @@ impl Engine {
     pub fn set_wind_scale(&mut self, scale: f64) {
         let s = scale.clamp(0.0, 3.0);
         self.wind_scale = s;
-        self.display.wind_scale = s;
-        self.display.wind.scale = s;
         self.trainer.wind_scale = s;
     }
 
@@ -102,9 +137,10 @@ impl Engine {
         }
         self.scenario = next;
         self.trainer.scenario = next;
-        self.trainer.weather = self.weather;
         self.trainer.destroy = self.destroy;
         self.trainer.wind_scale = self.wind_scale;
+        self.trainer.pin_storm = self.pin_storm;
+        self.trainer.pin_shear = self.pin_shear;
         self.trainer.retain_brain();
         self.rebuild_display(self.seed);
     }
@@ -114,25 +150,25 @@ impl Engine {
     }
 
     pub fn set_storm(&mut self, enabled: bool) {
-        self.weather.storm = enabled;
+        self.pin_storm = enabled;
+        self.trainer.pin_storm = enabled;
         self.display.weather.storm = enabled;
         self.display.wind.weather.storm = enabled;
-        self.trainer.weather.storm = enabled;
     }
 
     pub fn set_shear(&mut self, enabled: bool) {
-        self.weather.shear = enabled;
+        self.pin_shear = enabled;
+        self.trainer.pin_shear = enabled;
         self.display.weather.shear = enabled;
         self.display.wind.weather.shear = enabled;
-        self.trainer.weather.shear = enabled;
     }
 
     pub fn storm(&self) -> bool {
-        self.weather.storm
+        self.pin_storm
     }
 
     pub fn shear(&self) -> bool {
-        self.weather.shear
+        self.pin_shear
     }
 
     pub fn set_time_warp(&mut self, warp: f64) {
@@ -239,6 +275,19 @@ impl Engine {
 
     pub fn n_weights(&self) -> u32 {
         n_weights(self.trainer.hidden()) as u32
+    }
+
+    pub fn export_brain(&self) -> String {
+        self.trainer.export_brain()
+    }
+
+    pub fn import_brain(&mut self, json: &str) -> bool {
+        if !self.trainer.import_brain(json) {
+            return false;
+        }
+        self.scenario = self.trainer.scenario;
+        self.rebuild_display(self.seed.wrapping_add(self.trainer.generation));
+        true
     }
 }
 

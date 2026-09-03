@@ -19,7 +19,8 @@ use crate::policy::{
 use crate::constants::inertia_diag;
 use crate::scenario::Scenario;
 use crate::vehicle::{
-    aero, check_destruction_limits, propulsion, rcs_moment, DestroyReason, EngineGate,
+    aero, check_destruction_limits, propulsion, rcs_commanded, rcs_moment, DestroyReason,
+    EngineGate,
 };
 use crate::wind::{Weather, Wind};
 use rand::rngs::StdRng;
@@ -30,7 +31,7 @@ use serde::Serialize;
 pub enum Pilot {
     /// Hand-written tracker. Demo only — not the training prior.
     Autopilot,
-    /// MLP owns throttle, gimbal, and fins. No inner PD, no RCS.
+    /// MLP owns throttle, gimbal, fins, cluster, and RCS. No inner PD.
     Policy,
 }
 
@@ -82,6 +83,7 @@ pub struct Sim {
     pub last_periapsis_alt: f64,
     pub max_rate: f64,
     pub max_aoa: f64,
+    pub max_tilt: f64,
     pub tumble_s: f64,
     pub seed: u32,
     held_controls: Controls,
@@ -109,17 +111,35 @@ impl Sim {
         scenario: Scenario,
         weather: Weather,
     ) -> Self {
+        Self::new_with_opts(
+            seed,
+            destroy_enabled,
+            wind_scale,
+            scenario,
+            weather,
+            false,
+        )
+    }
+
+    pub fn new_with_opts(
+        seed: u32,
+        destroy_enabled: bool,
+        wind_scale: f64,
+        scenario: Scenario,
+        weather: Weather,
+        hard_pad: bool,
+    ) -> Self {
         // StdRng (ChaCha) is portable across wasm32 (32-bit) and native
         // x86_64. SmallRng is xoshiro256++ vs xoshiro128++.
         let mut rng = StdRng::seed_from_u64(seed as u64 + 17);
-        let spawn = scenario.spawn(&mut rng);
+        let spawn = scenario.spawn_var(&mut rng, hard_pad);
         let fuel = spawn.fuel;
         let mut s = Self {
             t: 0.0,
             r_eci: spawn.r_eci,
             v_eci: spawn.v_eci,
             q_body_to_eci: spawn.q_body_to_eci,
-            omega_body: Vec3::ZERO,
+            omega_body: spawn.omega_body,
             fuel,
             wind: Wind::new_weather(seed as u64 + 99, wind_scale, weather),
             destroy_enabled,
@@ -170,6 +190,7 @@ impl Sim {
             last_periapsis_alt: 0.0,
             max_rate: 0.0,
             max_aoa: 0.0,
+            max_tilt: 0.0,
             tumble_s: 0.0,
             seed,
             held_controls: Controls::default(),
@@ -336,12 +357,7 @@ impl Sim {
                 let need = self.last_policy_t < 0.0
                     || self.t - self.last_policy_t >= POLICY_DT - 1e-9;
                 if need {
-                    let feat = observe(
-                        &self.last_nav,
-                        body_y,
-                        self.omega_body,
-                        self.scenario,
-                    );
+                    let feat = observe(&self.last_nav, body_y, self.omega_body);
                     let y = mlp_forward(&self.weights, self.hidden, &feat);
                     self.held_controls = actions_from_mlp(&y, self.scenario.plane_lock());
                     self.last_policy_t = self.t;
@@ -353,6 +369,11 @@ impl Sim {
         let (thr, n_eng) = self.engine.apply(self.t, u.throttle, u.n_engines);
         u.throttle = thr;
         u.n_engines = n_eng;
+        u.gimbal_y = slew_axis(self.last_gimbal[0], u.gimbal_y, GIMBAL_SLEW_RAD_S, dt);
+        u.gimbal_z = slew_axis(self.last_gimbal[1], u.gimbal_z, GIMBAL_SLEW_RAD_S, dt);
+        u.fin_pitch = slew_axis(self.last_fins[0], u.fin_pitch, FIN_SLEW_RAD_S, dt);
+        u.fin_yaw = slew_axis(self.last_fins[1], u.fin_yaw, FIN_SLEW_RAD_S, dt);
+        u.fin_roll = slew_axis(self.last_fins[2], u.fin_roll, FIN_SLEW_RAD_S, dt);
 
         let a = aero(v_rel_body, air, u.fin_pitch, u.fin_yaw, u.fin_roll);
         let burn = propulsion(
@@ -384,7 +405,7 @@ impl Sim {
         let err_body = Vec3::new(err.dot(body_x), err.dot(body_y), err.dot(body_z));
         let i = inertia_diag(mass);
         let m_rcs = if self.pilot == Pilot::Policy {
-            Vec3::ZERO
+            rcs_commanded(Vec3::new(u.rcs_x, u.rcs_y, u.rcs_z), i, a.q)
         } else {
             rcs_moment(self.omega_body, err_body, i, a.q)
         };
@@ -428,10 +449,10 @@ impl Sim {
             self.omega_body.norm(),
             burn.mdot,
             dt,
-            mass_now,
         );
         self.max_rate = self.max_rate.max(self.omega_body.norm());
         self.max_aoa = self.max_aoa.max(self.last_aoa.abs());
+        self.max_tilt = self.max_tilt.max(self.last_nav.tilt);
         if self.last_aoa.abs() > 25.0 * std::f64::consts::PI / 180.0 && self.last_aero_q > 2_000.0 {
             self.tumble_s += dt;
         }
@@ -469,11 +490,6 @@ impl Sim {
             }
             self.v_eci = Vec3::ZERO;
             self.omega_body = Vec3::ZERO;
-            return;
-        }
-
-        if success(&self.last_nav, self.intact) {
-            self.term = TermReason::Success;
             return;
         }
 
@@ -634,6 +650,7 @@ impl Sim {
             scenario: self.scenario.as_str(),
             weather_storm: self.weather.storm,
             weather_shear: self.weather.shear,
+            weather_dir_off: self.weather.dir_off_deg,
             destroy_enabled: self.destroy_enabled,
             wind_scale: self.wind_scale,
             cd: self.last_cd,
@@ -699,6 +716,7 @@ pub struct Snapshot {
     pub scenario: &'static str,
     pub weather_storm: bool,
     pub weather_shear: bool,
+    pub weather_dir_off: f64,
     pub destroy_enabled: bool,
     pub wind_scale: f64,
     pub cd: f64,
@@ -711,14 +729,17 @@ pub struct Snapshot {
     pub relights: u32,
 }
 
-fn step_shaping(nav: &Nav, rate: f64, mdot: f64, dt: f64, mass: f64) -> f64 {
-    let h = nav.engine_alt.max(0.0);
-    let v_down = (-nav.v_enu.z).max(0.0);
-    let v_ref = slam_v_ref(h, mass);
-    let e_v = (v_down - v_ref).abs();
+fn slew_axis(current: f64, target: f64, rate: f64, dt: f64) -> f64 {
+    let max = (rate * dt).max(0.0);
+    current + (target - current).clamp(-max, max)
+}
+
+fn step_shaping(nav: &Nav, rate: f64, mdot: f64, dt: f64) -> f64 {
     let live = 0.35 * dt;
+    let climb = nav.v_enu.z.max(0.0).min(80.0);
     let path = -(0.025 * nav.range_h.min(800.0)
-        + 0.08 * e_v.min(160.0)
+        + 0.04 * nav.speed.min(160.0)
+        + 0.16 * climb
         + 6.0 * nav.tilt.min(1.2)
         + 3.0 * rate.min(2.5))
         * dt;
@@ -726,50 +747,37 @@ fn step_shaping(nav: &Nav, rate: f64, mdot: f64, dt: f64, mass: f64) -> f64 {
     live + path + fuel
 }
 
+#[cfg(test)]
 fn hop_fitness(sim: &Sim) -> f64 {
-    let n = &sim.last_nav;
-    let mut f = sim.shaping;
-    f -= 0.20 * n.engine_alt.min(400.0);
-    f -= 12.0 * n.speed.min(80.0);
-    f -= 50.0 * n.tilt.min(1.4);
-    f -= 4.0 * n.range_h.min(250.0);
-    f -= 20.0 * sim.max_rate.min(3.0);
-    match sim.term {
-        TermReason::Success => {
-            f += 12_000.0 - 40.0 * n.speed - 90.0 * n.tilt - 8.0 * n.range_h;
-        }
-        TermReason::GroundMiss => f -= 500.0,
-        TermReason::Destroyed => f -= 2_200.0,
-        TermReason::Timeout => f -= 1_200.0,
-        _ => f -= 800.0,
-    }
-    f - relight_penalty(sim)
+    episode_fitness(sim)
 }
 
-/// Fitness: higher is better. Dense range / corridor / energy terms so a
-/// 128-wide population can rank partial progress; a landing still dwarfs
-/// every miss.
+/// Fitness: higher is better. One kernel for hops and glide/RTLS so promote
+/// is not a landscape teleport. Hop stages only differ by a shorter timeout.
+/// A landing still dwarfs every miss.
 pub fn episode_fitness(sim: &Sim) -> f64 {
-    if sim.scenario.is_terminal_hop() {
-        return hop_fitness(sim);
-    }
     let n = &sim.last_nav;
+    let mut f = sim.shaping;
     let range = n.range_h;
     let closest = sim.min_range_gc.min(n.range_gc).min(n.range_h);
-    let mut f = sim.shaping;
-    f += -0.022 * range.min(120_000.0);
-    f += -0.018 * closest.min(120_000.0);
-    f += -0.045 * sim.max_corridor_offset.min(40_000.0);
-    f += -0.055 * n.speed.min(8_000.0);
-    f += -50.0 * n.tilt.min(1.6);
+    // Dense landing terms (capped so high-energy starts saturate until slow).
+    f -= 0.20 * n.engine_alt.min(400.0);
+    f -= 12.0 * n.speed.min(80.0);
+    f -= 50.0 * n.tilt.min(1.6);
+    f -= 4.0 * n.range_h.min(250.0);
+    f -= 20.0 * sim.max_rate.min(3.0);
+    f -= 2_000.0 * (sim.max_tilt - 0.20).max(0.0).min(1.5);
+    // Long-flight terms (tiny on a pad hop).
+    f -= 0.022 * range.min(120_000.0);
+    f -= 0.018 * closest.min(120_000.0);
+    f -= 0.045 * sim.max_corridor_offset.min(40_000.0);
+    f -= 0.055 * n.speed.min(8_000.0);
     f += 0.015 * sim.fuel.min(80_000.0);
-    // Spin / belly-flop / brick-dive. The old −0.00035×alt *paid* for
-    // falling; CMA then loved a tumbling dive toward the pad.
-    f += -280.0 * sim.max_rate.min(6.0);
-    f += -220.0 * sim.max_aoa.min(1.8);
-    f += -40.0 * sim.tumble_s.min(60.0);
+    f -= 260.0 * (sim.max_rate.min(6.0) - 3.0).max(0.0);
+    f -= 220.0 * sim.max_aoa.min(1.8);
+    f -= 40.0 * sim.tumble_s.min(60.0);
     if n.alt < 45_000.0 {
-        f += -0.05 * n.speed.min(3_000.0) * (1.0 - n.alt / 45_000.0);
+        f -= 0.05 * n.speed.min(3_000.0) * (1.0 - n.alt / 45_000.0);
     }
     if sim.max_aoa > 0.60 && sim.term != TermReason::Success {
         f -= 1_400.0;
@@ -793,6 +801,11 @@ pub fn episode_fitness(sim: &Sim) -> f64 {
     }
     if sim.destroy_reason == DestroyReason::GroundImpact {
         f -= 700.0;
+    }
+    // Min throttle T/W > 1, so "light and climb until timeout" otherwise
+    // beats a pad slap. Hanging is not a land.
+    if matches!(sim.term, TermReason::Timeout | TermReason::None) && n.engine_alt > 0.4 {
+        f -= 4_200.0 + 6.0 * n.engine_alt.min(800.0);
     }
     f - relight_penalty(sim)
 }
@@ -882,6 +895,7 @@ pub fn run_episode_with(
         scenario,
         weather,
         false,
+        false,
     );
     (tr.fitness, tr.term, tr.nav)
 }
@@ -895,8 +909,9 @@ pub fn run_episode_traced(
     scenario: Scenario,
     weather: Weather,
     soft_corridor: bool,
+    hard_pad: bool,
 ) -> EpisodeTrace {
-    let mut sim = Sim::new_with(seed, destroy, wind_scale, scenario, weather);
+    let mut sim = Sim::new_with_opts(seed, destroy, wind_scale, scenario, weather, hard_pad);
     sim.set_weights(weights);
     sim.pilot = Pilot::Policy;
     sim.soft_corridor = soft_corridor;
@@ -989,10 +1004,75 @@ mod tests {
         assert_eq!(sim.snapshot().scenario, "pad");
     }
 
+    #[test]
+    fn glide_zero_policy_does_not_land() {
+        let mut sim = Sim::new_with(2, true, 0.0, Scenario::Glide, Weather::default());
+        sim.pilot = Pilot::Policy;
+        sim.set_weights(&vec![0.0; crate::policy::n_weights(crate::policy::HIDDEN_START)]);
+        let mut guard = 0;
+        while !sim.terminated() && guard < 40_000 {
+            sim.step(sim.adaptive_dt());
+            guard += 1;
+        }
+        assert!(sim.terminated());
+        assert_ne!(sim.term, TermReason::Success);
+        assert_eq!(sim.engine.lights, 0);
+        assert!(sim.last_rcs.abs() < 1e-9);
+    }
+
     fn throttle_out_bias(hidden: usize) -> usize {
         let b1 = hidden * crate::policy::N_IN;
         let w2 = b1 + hidden;
         w2 + crate::policy::N_OUT * hidden
+    }
+
+    fn pad_rollout(seed: u32, set: impl Fn(&mut [f64])) -> (f64, TermReason, f64, f64, u32) {
+        let mut sim = Sim::new_with(seed, true, 0.0, Scenario::Pad, Weather::default());
+        sim.pilot = Pilot::Policy;
+        let h = crate::policy::HIDDEN_START;
+        let mut w = vec![0.0; crate::policy::n_weights(h)];
+        set(&mut w);
+        sim.set_weights(&w);
+        let mut guard = 0;
+        while !sim.terminated() && guard < 20_000 {
+            sim.step(sim.adaptive_dt());
+            guard += 1;
+        }
+        (
+            episode_fitness(&sim),
+            sim.term,
+            sim.last_nav.tilt.to_degrees(),
+            sim.max_rate.to_degrees(),
+            sim.engine.lights,
+        )
+    }
+
+    #[test]
+    fn plane_lock_rcs_does_not_cartwheel() {
+        let b2 = throttle_out_bias(crate::policy::HIDDEN_START);
+        let rcs = pad_rollout(7, |w| w[b2 + 8] = 2.0);
+        assert_eq!(rcs.4, 0);
+        assert!(
+            rcs.2.abs() < 8.0,
+            "2D pad RCS should be off, tilt {}°",
+            rcs.2
+        );
+    }
+
+    #[test]
+    fn gimbaled_pad_burn_loses_to_upright_fall() {
+        let b2 = throttle_out_bias(crate::policy::HIDDEN_START);
+        let fall = pad_rollout(7, |_| {});
+        let gimb = pad_rollout(7, |w| {
+            w[b2] = 2.0;
+            w[b2 + 1] = 2.0;
+        });
+        assert!(
+            gimb.0 < fall.0,
+            "TVC cartwheel {} should lose to upright slap {}",
+            gimb.0,
+            fall.0
+        );
     }
 
     #[test]
@@ -1035,6 +1115,44 @@ mod tests {
         b.scenario = Scenario::Glide;
         let dg = episode_fitness(&a) - episode_fitness(&b);
         assert!((dg - RELIGHT_FITNESS * 4.0).abs() < 1e-9, "glide delta {dg}");
+    }
+
+    #[test]
+    fn hop_and_glide_share_the_fitness_kernel() {
+        let mut hop = Sim::new_with(1, true, 0.0, Scenario::Pad, Weather::default());
+        hop.term = TermReason::Timeout;
+        let mut glide = hop.clone();
+        glide.scenario = Scenario::Glide;
+        let dh = episode_fitness(&hop);
+        let dg = episode_fitness(&glide);
+        assert!(
+            (dh - dg).abs() < 1e-9,
+            "scenario label must not change the kernel: hop={dh} glide={dg}"
+        );
+    }
+
+    #[test]
+    fn climbing_away_loses_to_a_pad_slap() {
+        let mut fly = Sim::new_with(1, true, 0.0, Scenario::Pad, Weather::default());
+        fly.term = TermReason::Timeout;
+        fly.last_nav.engine_alt = 400.0;
+        fly.last_nav.alt = 430.0;
+        fly.last_nav.speed = 6.0;
+        fly.last_nav.v_enu = Vec3::new(0.0, 0.0, 6.0);
+        fly.last_nav.tilt = 0.05;
+        let mut slap = fly.clone();
+        slap.term = TermReason::Destroyed;
+        slap.destroy_reason = DestroyReason::GroundImpact;
+        slap.last_nav.engine_alt = 0.2;
+        slap.last_nav.alt = 25.0;
+        slap.last_nav.speed = 42.0;
+        slap.last_nav.v_enu = Vec3::new(0.0, 0.0, -42.0);
+        let up = episode_fitness(&fly);
+        let hit = episode_fitness(&slap);
+        assert!(
+            up < hit,
+            "timeout-high {up} should lose to ground impact {hit}"
+        );
     }
 
     #[test]
