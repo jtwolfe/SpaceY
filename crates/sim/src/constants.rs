@@ -57,14 +57,27 @@ pub const N_ENGINES_LANDING: u8 = 1;
 pub const THROTTLE_MIN: f64 = 0.40; // Merlin 1D deep-throttle ballpark
 pub const THROTTLE_MAX: f64 = 1.00;
 pub const GIMBAL_MAX_RAD: f64 = 5.0 * std::f64::consts::PI / 180.0;
+/// Once lit, a Merlin cannot chatter off at the 10 Hz policy tick.
+pub const ENGINE_MIN_BURN_S: f64 = 2.5;
+/// Shutdown → restart delay. PWM-by-relight is not a throttle.
+pub const ENGINE_RESTART_DELAY_S: f64 = 6.0;
+/// Fitness cost per extra ignition after the first. A land still wins.
+pub const RELIGHT_FITNESS: f64 = 320.0;
 
 /// Titanium grid fins (Block 5): four surfaces, roughly 1.2 × 1.5 m planform
-/// in public photos / patent drawings. Treated as lifting surfaces with a
-/// generous Cl_δ — grids are dense and effective, but this is not a CFD table.
+/// in public photos / patent drawings. Lattice Cd at δ=0 is the weathercock
+/// (flow through the waffle still has a lot of wetted area). Not a CFD table.
 pub const N_GRID_FINS: u8 = 4;
 pub const FIN_AREA_M2: f64 = 1.8;
 pub const FIN_MAX_DEFLECT_RAD: f64 = 28.0 * std::f64::consts::PI / 180.0;
 pub const FIN_ARM_M: f64 = 18.5; // CG → fin plane along +X (interstage end)
+/// Axial lattice drag coefficient of one deployed grid at zero deflection.
+pub const FIN_CD0: f64 = 0.55;
+/// Side-force slope vs deflection (rad⁻¹), order-of-magnitude Cl_δ.
+pub const FIN_CL_DELTA: f64 = 0.55;
+/// Body+engine CP along +X. Negative = engine-side of the CG (destabilizing
+/// alone). Grids at +FIN_ARM_M pull the net CP aft of the CG.
+pub const BODY_CP_X_M: f64 = -1.6;
 
 /// Structural / load limits used when destruction is enabled. Falcon 9 max-Q
 /// on ascent is publicly ~30 kPa; reentry with an entry burn stays in a
@@ -77,87 +90,32 @@ pub const AOA_DESTROY_RAD: f64 = 42.0 * std::f64::consts::PI / 180.0;
 pub const Q_FOR_AOA_DESTROY_PA: f64 = 12_000.0;
 pub const RATE_DESTROY_RAD_S: f64 = 3.5;
 
-/// Orbital-energy scenario (LEO-class start). First stages do not actually
-/// reach this energy; the same F9-class vehicle is flown from a circular
-/// ~220 km / ~7.8 km/s inertial state to exercise deorbit → entry → landing.
-pub const ORBITAL_ALT_M: f64 = 220_000.0;
-/// LEO start load. Still a deorbit remnant (~18% of the 396 t ascent
-/// tank), **not** a first-stage ascent fill. The extra vs RTLS 40 t is
-/// the hypersonic capture plus a pad-theater landing stash so the
-/// Q-pulse and the overflight brake do not dry the tanks off-pad.
-pub const ORBITAL_START_FUEL_KG: f64 = 78_000.0;
-/// Periapsis after the retrograde deorbit. High enough to avoid a 20 g
-/// brick, low enough that a 3-engine entry burn can capture.
-pub const DEORBIT_PERI_TARGET_M: f64 = 75_000.0;
-/// Once osculating periapsis is at or below this, never re-open the
-/// deorbit burn — J2 makes the Keplerian periapsis wander a few km.
-pub const DEORBIT_PERI_DONE_M: f64 = 83_000.0;
-/// Place periapsis *uprange* (west) of LZ-1. After the vacuum capture
-/// the vehicle still overflies at ~65 km / ~5 km/s and skips ~500 km;
-/// this offset puts that skip's landing near the pad instead of hundreds
-/// of km east (or, with the ECEF sign fix, west) of it.
-pub const LEO_PERI_UPRANGE_M: f64 = 724_000.0;
-/// Open the entry *phase* once the pad is this close. The burn itself is
-/// gated by a speed-vs-range schedule so we do not drop short.
-pub const LEO_ENTRY_RANGE_M: f64 = 1_187_000.0;
-/// Inbound range at which the 3-engine vacuum capture may start.
-/// Must sit *before* periapsis (see `LEO_PERI_UPRANGE_M`).
-pub const LEO_CAPTURE_RANGE_M: f64 = 1_007_000.0;
-/// RP-1 reserved for the landing burn through the *vacuum* slam.
-/// The Q-hold may spend down to `LEO_LANDING_STASH_KG` so the pulse
-/// actually brakes instead of coasting into a 249 kPa spike and then
-/// refusing to burn because fuel is already below this 8 t floor.
-pub const LEO_LANDING_FUEL_KG: f64 = 8_000.0;
-/// Floor the atmospheric Q-hold will not spend below. Enough for a
-/// pad-theater landing burn after aero has bled the skip to ~400 m/s,
-/// not a 50 km east slide with engines off.
-pub const LEO_LANDING_STASH_KG: f64 = 3_800.0;
-/// Extra propellant kept through the vacuum slam so the atmospheric
-/// pulse can still brake without going dry. Landing reserve is inside this.
-pub const LEO_PULSE_RESERVE_KG: f64 = 15_000.0;
-/// Landing latch / fuel-to-pad theater. Outside this, a hover-slam
-/// cannot reach LZ-1.
-pub const LEO_LANDING_THEATER_M: f64 = 50_000.0;
-/// Commit the landing burn once this close and this low — waiting for
-/// a 1.6 km suicide latch is how #4 slid 50 km east of LZ-1.
-pub const LEO_LANDING_COMMIT_RANGE_M: f64 = 8_000.0;
-pub const LEO_LANDING_COMMIT_ALT_M: f64 = 5_500.0;
-/// Do not commit a landing slam while still hypersonic — that dumps
-/// the tanks at 13 km / 1 km/s and slides 40 km east.
-pub const LEO_LANDING_COMMIT_SPEED_MPS: f64 = 320.0;
-/// Fuel-to-pad bound: further than this in LANDING is infeasible.
-pub const LEO_PAD_REACH_M: f64 = 80_000.0;
-/// Pad-ENU corridor is meaningless until the vehicle is in this theater.
-pub const LEO_CORRIDOR_THEATER_M: f64 = 700_000.0;
-pub const LEO_CORRIDOR_PAD_M: f64 = 18_000.0;
-pub const LEO_CORRIDOR_SLOPE: f64 = 28.0;
 /// Cold-gas RCS angular acceleration (vacuum attitude hold). F9-class
-/// nitrogen thrusters; not deducted from RP-1.
+/// nitrogen thrusters; not deducted from RP-1. Autopilot demo only.
 pub const RCS_ANG_ACCEL: f64 = 0.18;
-/// RCS fades as Q rises. 160 kPa keeps cold-gas in the LEO pad-theater
-/// glide (Q ~ 70–120 kPa) so the stack can follow a dive command
-/// against weathercock.
+/// RCS fades as Q rises so grid fins own the air.
 pub const RCS_Q_HANDOFF_PA: f64 = 160_000.0;
-/// LEO-class airframe limits. Ascent max-Q is ~30 kPa; a 7.8 km/s entry
-/// with a real entry burn still peaks well above that. These trip a skip
-/// or a tumble, not a clean tail-first capture.
-pub const LEO_Q_DESTROY_PA: f64 = 250_000.0;
-pub const LEO_G_DESTROY: f64 = 18.0;
-pub const LEO_Q_ALPHA_DESTROY: f64 = 4_200.0;
-pub const LEO_RATE_DESTROY_RAD_S: f64 = 5.0;
 pub const RTLS_TIMEOUT_S: f64 = 420.0;
-pub const LEO_TIMEOUT_S: f64 = 3_200.0;
 
-/// Landing success box (engine-bell / pad frame).
-/// Portable 3-engine last-metre residual on seed 88: ~11 m engine,
-/// ~12 m/s, ~40 m range, ~20° tilt — still over LZ-1, intact, not a
-/// ground-impact. Tighter than the #4 50 km east miss; a bit looser
-/// than the host-glibc / SmallRng-64 5.4 m/s / 20 m land in #5.
+/// Landing success box (engine-bell / pad frame). A toy-soft F9 landing:
+/// legs ~8 m, a few m/s, on the pad, upright. Not a 26 m/s hard hit.
 pub const SUCCESS_ENGINE_ALT_M: f64 = 12.0;
-pub const SUCCESS_SPEED_MPS: f64 = 13.0;
-pub const SUCCESS_HVEL_MPS: f64 = 10.0;
-pub const SUCCESS_PAD_OFFSET_M: f64 = 45.0;
-pub const SUCCESS_TILT_RAD: f64 = 21.0 * std::f64::consts::PI / 180.0;
+pub const SUCCESS_SPEED_MPS: f64 = 8.0;
+pub const SUCCESS_HVEL_MPS: f64 = 4.0;
+pub const SUCCESS_PAD_OFFSET_M: f64 = 20.0;
+pub const SUCCESS_TILT_RAD: f64 = 12.0 * std::f64::consts::PI / 180.0;
+/// Structural slap. Hotter than the success box, still well below a 26 m/s RUD.
+/// A 10 m/s pad sit-down is a miss, not an explosion — otherwise CMA treats
+/// every near-land as a fireball.
+pub const IMPACT_SPEED_MPS: f64 = 20.0;
+pub const IMPACT_TILT_RAD: f64 = 20.0 * std::f64::consts::PI / 180.0;
+
+pub const HOVER_TIMEOUT_S: f64 = 45.0;
+pub const SUICIDE_TIMEOUT_S: f64 = 90.0;
+pub const GLIDE_TIMEOUT_S: f64 = 200.0;
+pub const HOVER_FUEL_KG: f64 = 2_800.0;
+pub const SUICIDE_FUEL_KG: f64 = 8_500.0;
+pub const GLIDE_FUEL_KG: f64 = 18_000.0;
 
 pub fn wet_mass(fuel: f64) -> f64 {
     DRY_MASS_KG + fuel.max(0.0)

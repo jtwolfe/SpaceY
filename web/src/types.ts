@@ -23,7 +23,9 @@ export type Snapshot = {
   thrust: number;
   n_engines: number;
   fins: [number, number, number];
+  fin_delta?: [number, number, number, number];
   gimbal: [number, number];
+  rcs?: number;
   tilt_deg: number;
   heat: number;
   phase: string;
@@ -47,6 +49,31 @@ export type Snapshot = {
   wind_scale: number;
   cd: number;
   v_ground: [number, number, number];
+  pilot?: string;
+  v_slam?: number;
+  slam_xyz?: number[] | Float32Array;
+  plane_lock?: boolean;
+  lights?: number;
+  relights?: number;
+};
+
+export type PackedTrails = {
+  generation: number;
+  n: number;
+  best_idx: number;
+  fitnesses: number[];
+  terms: string[];
+  t_end: number[];
+  xyz: number[] | Float32Array;
+  lat: number[] | Float32Array;
+  lon: number[] | Float32Array;
+  counts: number[] | Uint32Array | Float64Array;
+};
+
+export type GenerationViz = {
+  stamp: number;
+  live: PackedTrails;
+  prev: PackedTrails;
 };
 
 export type TrainInfo = {
@@ -62,4 +89,24 @@ export type TrainInfo = {
   fitnesses: number[];
   terms: string[];
   last_successes: number;
+  viz_stamp: number;
+  history_best: number[];
+  history_mean: number[];
+  history_lands: number[];
+  hidden?: number;
+  n_weights?: number;
+  growths?: number;
+  land_rate?: number;
+  promote_ready?: boolean;
+  promote_to?: number;
+  stage?: string;
+  stage_n?: number;
+  stage_count?: number;
+  stage_label?: string;
+  live_n?: number;
+  live_lands?: number;
+  live_impact?: number;
+  live_miss?: number;
+  last_impact?: number;
+  last_miss?: number;
 };

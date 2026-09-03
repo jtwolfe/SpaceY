@@ -67,7 +67,7 @@ html, body, #app {
 .hud {
   position: absolute;
   top: 72px;
-  width: 268px;
+  width: 280px;
   padding: 14px 16px 16px;
   background: var(--panel);
   border: 1px solid var(--line);
@@ -89,15 +89,33 @@ dl { display: grid; grid-template-columns: 1fr auto; gap: 3px 10px; }
 dt { font-family: var(--mono); font-size: 11px; color: var(--dim); }
 dd { font-family: var(--mono); font-size: 11px; text-align: right; color: var(--text); }
 
-.train-meta { font-family: var(--mono); font-size: 11px; color: var(--amber); margin-bottom: 8px; }
-.bars { display: flex; align-items: flex-end; gap: 3px; height: 72px; margin-bottom: 8px; }
-.bars i {
-  flex: 1;
-  background: linear-gradient(to top, #1b6b88, var(--cyan));
-  min-height: 2px;
-  opacity: 0.85;
+.train-meta { font-family: var(--mono); font-size: 11px; color: var(--amber); margin-bottom: 8px; line-height: 1.45; white-space: pre-wrap; }
+.phase-dots {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin: 0 0 8px;
 }
-.bars i.best { background: linear-gradient(to top, #2a7a4a, var(--ok)); }
+.phase-dots span {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: transparent;
+}
+.phase-dots span.done { background: var(--ok); border-color: var(--ok); }
+.phase-dots span.now { background: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 6px var(--cyan); }
+.phase-dots span.ready { border-color: var(--ok); }
+#fit-spark, #fit-hist {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin-bottom: 6px;
+  border: 1px solid var(--line);
+  background: rgba(4, 10, 22, 0.55);
+}
+#fit-spark { height: 42px; }
+#fit-hist { height: 56px; }
 
 .dock {
   position: absolute;
@@ -136,6 +154,22 @@ button.on { background: rgba(126, 224, 255, 0.14); border-color: var(--cyan); co
   gap: 6px;
 }
 input[type="range"] { accent-color: var(--cyan); width: 90px; }
+
+.nav-hint {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--dim);
+  letter-spacing: 0.04em;
+  margin-top: 6px;
+  line-height: 1.35;
+}
+#nav-map {
+  display: block;
+  width: 100%;
+  height: 132px;
+  border: 1px solid var(--line);
+  background: rgba(4, 10, 22, 0.8);
+}
 
 .warn { color: var(--amber) !important; }
 .bad { color: var(--red) !important; }

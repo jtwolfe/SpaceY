@@ -1,21 +1,22 @@
-//! Separable / full-lite CMA-ES trainer for the residual policy.
+//! Hansen CMA-ES trainer for the MLP policy.
 //!
-//! Classic Hansen CMA-ES with Cholesky sampling and a z-space evolution path
-//! for step-size. Covariance is rank-μ + rank-1. Designed to run inside the
-//! browser: one generation is a handful of 6DOF rollouts, no backprop.
+//! Rank-μ + rank-1 covariance, Cholesky sampling. Population is large so the
+//! browser can draw a whole generation at once (swarm trails).
 
-use crate::guidance::{TermReason, N_WEIGHTS};
+use crate::guidance::TermReason;
 use crate::math::{cos, exp, ln, sqrt};
-use crate::scenario::Scenario;
-use crate::sim::run_episode_with;
+use crate::policy::{expand_hidden, n_weights, HIDDEN_MAX, HIDDEN_START};
+use crate::scenario::{Scenario, STAGE_COUNT};
+use crate::sim::{run_episode_traced, EpisodeTrace};
 use crate::wind::Weather;
 use rand::rngs::SmallRng;
 use rand::Rng;
 use rand::SeedableRng;
 use serde::Serialize;
 
-const LAMBDA: usize = 12;
-const MU: usize = 6;
+pub const LAMBDA: usize = 128;
+pub const MU: usize = 32;
+const HISTORY_CAP: usize = 80;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct CandidateStat {
@@ -37,6 +38,84 @@ pub struct TrainInfo {
     pub fitnesses: Vec<f64>,
     pub terms: Vec<String>,
     pub last_successes: u32,
+    pub viz_stamp: u32,
+    pub history_best: Vec<f32>,
+    pub history_mean: Vec<f32>,
+    pub history_lands: Vec<f32>,
+    pub hidden: u32,
+    pub n_weights: u32,
+    pub growths: u32,
+    pub land_rate: f64,
+    pub promote_ready: bool,
+    pub promote_to: i32,
+    pub stage: String,
+    pub stage_n: u32,
+    pub stage_count: u32,
+    pub stage_label: String,
+    pub live_n: u32,
+    pub live_lands: u32,
+    pub live_impact: u32,
+    pub live_miss: u32,
+    pub last_impact: u32,
+    pub last_miss: u32,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct PackedTrails {
+    pub generation: u32,
+    pub n: u32,
+    pub best_idx: i32,
+    pub fitnesses: Vec<f64>,
+    pub terms: Vec<String>,
+    pub t_end: Vec<f32>,
+    pub xyz: Vec<f32>,
+    pub lat: Vec<f32>,
+    pub lon: Vec<f32>,
+    pub counts: Vec<u32>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct GenerationViz {
+    pub stamp: u32,
+    pub live: PackedTrails,
+    pub prev: PackedTrails,
+}
+
+fn pack_trails(generation: u32, paths: &[EpisodeTrace]) -> PackedTrails {
+    let mut best_idx: i32 = -1;
+    let mut best = f64::NEG_INFINITY;
+    let mut fitnesses = Vec::with_capacity(paths.len());
+    let mut terms = Vec::with_capacity(paths.len());
+    let mut t_end = Vec::with_capacity(paths.len());
+    let mut xyz = Vec::new();
+    let mut lat = Vec::new();
+    let mut lon = Vec::new();
+    let mut counts = Vec::with_capacity(paths.len());
+    for (i, p) in paths.iter().enumerate() {
+        fitnesses.push(p.fitness);
+        terms.push(p.term.as_str().to_string());
+        t_end.push(p.t_end);
+        counts.push((p.lat.len() as u32).min(p.xyz.len() as u32 / 3));
+        xyz.extend_from_slice(&p.xyz);
+        lat.extend_from_slice(&p.lat);
+        lon.extend_from_slice(&p.lon);
+        if p.fitness > best {
+            best = p.fitness;
+            best_idx = i as i32;
+        }
+    }
+    PackedTrails {
+        generation,
+        n: paths.len() as u32,
+        best_idx,
+        fitnesses,
+        terms,
+        t_end,
+        xyz,
+        lat,
+        lon,
+        counts,
+    }
 }
 
 pub struct Trainer {
@@ -63,17 +142,29 @@ pub struct Trainer {
     last_terms: Vec<String>,
     last_successes: u32,
     rng: SmallRng,
-    /// In-progress generation samples (weights).
     pending: Vec<Vec<f64>>,
     pending_z: Vec<Vec<f64>>,
     pending_y: Vec<Vec<f64>>,
     pending_f: Vec<Option<(f64, TermReason)>>,
     eval_index: usize,
+    live_paths: Vec<EpisodeTrace>,
+    prev_paths: Vec<EpisodeTrace>,
+    viz_stamp: u32,
+    history_best: Vec<f32>,
+    history_mean: Vec<f32>,
+    history_lands: Vec<f32>,
+    improved_best: bool,
+    hidden: usize,
+    gens_since_best: u32,
+    growths: u32,
+    land_streak: u32,
+    promote_ready: bool,
+    promoted: bool,
 }
 
 impl Trainer {
     pub fn new(seed: u32, destroy: bool, wind_scale: f64) -> Self {
-        let n = N_WEIGHTS;
+        let n = n_weights(HIDDEN_START);
         let mut weights_w = Vec::with_capacity(MU);
         for i in 0..MU {
             weights_w.push((ln(MU as f64 + 0.5) - ln((i + 1) as f64)).max(0.01));
@@ -89,11 +180,11 @@ impl Trainer {
             episodes: 0,
             destroy,
             wind_scale,
-            scenario: Scenario::Rtls,
+            scenario: Scenario::Pad,
             weather: Weather::default(),
             scenario_seed: seed,
             mean: vec![0.0; n],
-            sigma: 0.22,
+            sigma: 0.28,
             l: identity(n),
             c: identity(n),
             pc: vec![0.0; n],
@@ -111,11 +202,129 @@ impl Trainer {
             pending_y: Vec::new(),
             pending_f: Vec::new(),
             eval_index: 0,
+            live_paths: Vec::new(),
+            prev_paths: Vec::new(),
+            viz_stamp: 0,
+            history_best: Vec::new(),
+            history_mean: Vec::new(),
+            history_lands: Vec::new(),
+            improved_best: false,
+            hidden: HIDDEN_START,
+            gens_since_best: 0,
+            growths: 0,
+            land_streak: 0,
+            promote_ready: false,
+            promoted: false,
         }
     }
 
     pub fn best_weights(&self) -> &[f64] {
         &self.best_weights
+    }
+
+    pub fn hidden(&self) -> usize {
+        self.hidden
+    }
+
+    fn dim(&self) -> usize {
+        self.mean.len()
+    }
+
+    /// Drop CMA-ES state when the mission is reset.
+    pub fn reset_policy(&mut self) {
+        self.hidden = HIDDEN_START;
+        self.growths = 0;
+        self.gens_since_best = 0;
+        self.land_streak = 0;
+        self.promote_ready = false;
+        self.promoted = false;
+        let n = n_weights(self.hidden);
+        self.running = false;
+        self.generation = 0;
+        self.episodes = 0;
+        self.mean = vec![0.0; n];
+        self.sigma = 0.28;
+        self.l = identity(n);
+        self.c = identity(n);
+        self.pc = vec![0.0; n];
+        self.ps = vec![0.0; n];
+        self.best_ever = f64::NEG_INFINITY;
+        self.best_weights = vec![0.0; n];
+        self.last_fitnesses = vec![0.0; LAMBDA];
+        self.last_terms = vec![String::new(); LAMBDA];
+        self.last_successes = 0;
+        self.pending.clear();
+        self.pending_z.clear();
+        self.pending_y.clear();
+        self.pending_f.clear();
+        self.eval_index = 0;
+        self.live_paths.clear();
+        self.prev_paths.clear();
+        self.viz_stamp = self.viz_stamp.wrapping_add(1);
+        self.history_best.clear();
+        self.history_mean.clear();
+        self.history_lands.clear();
+        self.improved_best = false;
+    }
+
+    /// Keep the MLP mean when moving along the curriculum; reset CMA covariance.
+    pub fn retain_brain(&mut self) {
+        let running = self.running;
+        let n = self.dim();
+        self.running = running;
+        self.generation = 0;
+        self.episodes = 0;
+        self.sigma = (self.sigma * 1.25).clamp(0.12, 0.45);
+        self.l = identity(n);
+        self.c = identity(n);
+        self.pc = vec![0.0; n];
+        self.ps = vec![0.0; n];
+        self.best_ever = f64::NEG_INFINITY;
+        self.last_fitnesses = vec![0.0; LAMBDA];
+        self.last_terms = vec![String::new(); LAMBDA];
+        self.last_successes = 0;
+        self.pending.clear();
+        self.pending_z.clear();
+        self.pending_y.clear();
+        self.pending_f.clear();
+        self.eval_index = 0;
+        self.live_paths.clear();
+        self.prev_paths.clear();
+        self.viz_stamp = self.viz_stamp.wrapping_add(1);
+        self.history_best.clear();
+        self.history_mean.clear();
+        self.history_lands.clear();
+        self.improved_best = false;
+        self.gens_since_best = 0;
+        self.land_streak = 0;
+        self.promote_ready = false;
+        if running {
+            self.sample_generation();
+        }
+    }
+
+    /// Advance one training stage, keep champion weights, reset covariance.
+    fn try_promote(&mut self) -> bool {
+        if !self.promote_ready {
+            return false;
+        }
+        let Some(next) = self.scenario.next_gate() else {
+            self.promote_ready = false;
+            return false;
+        };
+        self.scenario = next;
+        if next == Scenario::Wind && self.wind_scale < 0.4 {
+            self.wind_scale = 1.0;
+        }
+        self.promoted = true;
+        self.retain_brain();
+        true
+    }
+
+    pub fn take_promoted(&mut self) -> bool {
+        let p = self.promoted;
+        self.promoted = false;
+        p
     }
 
     pub fn start(&mut self) {
@@ -130,7 +339,7 @@ impl Trainer {
     }
 
     fn sample_generation(&mut self) {
-        let n = N_WEIGHTS;
+        let n = self.dim();
         self.pending.clear();
         self.pending_z.clear();
         self.pending_y.clear();
@@ -154,6 +363,7 @@ impl Trainer {
     /// Evaluate as many pending candidates as fit in `budget_ms` wall time.
     /// Returns true if a generation completed.
     pub fn tick(&mut self, budget_ms: f64) -> bool {
+        self.improved_best = false;
         if !self.running {
             return false;
         }
@@ -170,24 +380,48 @@ impl Trainer {
                 .wrapping_add(self.generation * 17)
                 .wrapping_add(self.eval_index as u32 * 31)
                 .wrapping_add(self.rng.gen::<u32>() % 8);
-            let (fit, term, _) = run_episode_with(
+            let wind = if self.scenario.domain_rand_wind() {
+                self.wind_scale.max(0.65) * (0.5 + self.rng.gen::<f64>())
+            } else {
+                self.wind_scale
+            };
+            let tr = run_episode_traced(
                 &self.pending[self.eval_index],
                 seed,
                 self.destroy,
-                self.wind_scale,
+                wind,
                 self.scenario,
                 self.weather,
+                true,
             );
-            self.pending_f[self.eval_index] = Some((fit, term));
+            self.pending_f[self.eval_index] = Some((tr.fitness, tr.term));
+            self.live_paths.push(tr);
             self.eval_index += 1;
             self.episodes += 1;
+            self.viz_stamp = self.viz_stamp.wrapping_add(1);
         }
         self.finish_generation();
         true
     }
 
+    pub fn viz(&self) -> GenerationViz {
+        GenerationViz {
+            stamp: self.viz_stamp,
+            live: pack_trails(self.generation, &self.live_paths),
+            prev: pack_trails(
+                self.generation.saturating_sub(1),
+                &self.prev_paths,
+            ),
+        }
+    }
+
+    /// True if the last `tick` that finished a generation found a new champion.
+    pub fn took_new_best(&self) -> bool {
+        self.improved_best
+    }
+
     fn finish_generation(&mut self) {
-        let n = N_WEIGHTS;
+        let n = self.dim();
         let mut order: Vec<usize> = (0..LAMBDA).collect();
         order.sort_by(|a, b| {
             let fa = self.pending_f[*a].map(|p| p.0).unwrap_or(f64::NEG_INFINITY);
@@ -211,12 +445,39 @@ impl Trainer {
             .iter()
             .filter(|p| matches!(p, Some((_, TermReason::Success))))
             .count() as u32;
+        let land_frac = self.last_successes as f64 / LAMBDA as f64;
+        if land_frac + 1e-9 >= 0.30 {
+            self.land_streak = self.land_streak.saturating_add(1);
+        } else {
+            self.land_streak = 0;
+            self.promote_ready = false;
+        }
+        if self.land_streak >= 3 && self.scenario.next_gate().is_some() {
+            self.promote_ready = true;
+        }
 
         let best = self.last_fitnesses[0];
         if best > self.best_ever {
             self.best_ever = best;
             self.best_weights = self.pending[order[0]].clone();
+            self.improved_best = true;
+            self.gens_since_best = 0;
+        } else {
+            self.gens_since_best = self.gens_since_best.saturating_add(1);
         }
+
+        let mean = self.last_fitnesses.iter().sum::<f64>() / self.last_fitnesses.len().max(1) as f64;
+        self.history_best.push(self.best_ever as f32);
+        self.history_mean.push(mean as f32);
+        self.history_lands.push(self.last_successes as f32);
+        if self.history_best.len() > HISTORY_CAP {
+            self.history_best.remove(0);
+            self.history_mean.remove(0);
+            self.history_lands.remove(0);
+        }
+
+        self.prev_paths = std::mem::take(&mut self.live_paths);
+        self.viz_stamp = self.viz_stamp.wrapping_add(1);
 
         let mut yw = vec![0.0; n];
         let mut zw = vec![0.0; n];
@@ -273,7 +534,35 @@ impl Trainer {
         }
 
         self.generation += 1;
-        self.sample_generation();
+        self.maybe_grow();
+        if !self.try_promote() {
+            self.sample_generation();
+        }
+    }
+
+    fn maybe_grow(&mut self) {
+        if self.hidden >= HIDDEN_MAX {
+            return;
+        }
+        if self.gens_since_best < 14 {
+            return;
+        }
+        if self.sigma > 0.12 {
+            return;
+        }
+        let h0 = self.hidden;
+        self.hidden += 1;
+        self.mean = expand_hidden(&self.mean, h0);
+        self.best_weights = expand_hidden(&self.best_weights, h0);
+        let n = n_weights(self.hidden);
+        self.c = identity(n);
+        self.l = identity(n);
+        self.pc = vec![0.0; n];
+        self.ps = vec![0.0; n];
+        self.sigma = (self.sigma * 1.35).clamp(0.10, 0.40);
+        self.gens_since_best = 0;
+        self.growths += 1;
+        self.improved_best = true;
     }
 
     pub fn info(&self) -> TrainInfo {
@@ -289,18 +578,62 @@ impl Trainer {
             population: LAMBDA,
             best_fitness: self.last_fitnesses.first().copied().unwrap_or(0.0),
             mean_fitness: mean,
-            best_ever: if self.best_ever.is_finite() {
-                self.best_ever
-            } else {
-                0.0
+            best_ever: {
+                let live_best = self
+                    .live_paths
+                    .iter()
+                    .map(|p| p.fitness)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let b = if self.best_ever.is_finite() {
+                    self.best_ever.max(live_best)
+                } else {
+                    live_best
+                };
+                if b.is_finite() { b } else { 0.0 }
             },
             sigma: self.sigma,
             episodes: self.episodes,
             fitnesses: self.last_fitnesses.clone(),
             terms: self.last_terms.clone(),
             last_successes: self.last_successes,
+            viz_stamp: self.viz_stamp,
+            history_best: self.history_best.clone(),
+            history_mean: self.history_mean.clone(),
+            history_lands: self.history_lands.clone(),
+            hidden: self.hidden as u32,
+            n_weights: self.dim() as u32,
+            growths: self.growths,
+            land_rate: if self.last_fitnesses.is_empty() {
+                0.0
+            } else {
+                self.last_successes as f64 / LAMBDA as f64
+            },
+            promote_ready: self.promote_ready,
+            promote_to: self
+                .scenario
+                .next_gate()
+                .map(|s| s.id() as i32)
+                .unwrap_or(-1),
+            stage: self.scenario.as_str().to_string(),
+            stage_n: self.scenario.id() + 1,
+            stage_count: STAGE_COUNT,
+            stage_label: self.scenario.label().to_string(),
+            live_n: self.live_paths.len() as u32,
+            live_lands: count_term_paths(&self.live_paths, TermReason::Success),
+            live_impact: count_term_paths(&self.live_paths, TermReason::Destroyed),
+            live_miss: count_term_paths(&self.live_paths, TermReason::GroundMiss),
+            last_impact: count_term_str(&self.last_terms, TermReason::Destroyed.as_str()),
+            last_miss: count_term_str(&self.last_terms, TermReason::GroundMiss.as_str()),
         }
     }
+}
+
+fn count_term_paths(paths: &[EpisodeTrace], want: TermReason) -> u32 {
+    paths.iter().filter(|p| p.term == want).count() as u32
+}
+
+fn count_term_str(terms: &[String], want: &str) -> u32 {
+    terms.iter().filter(|t| t.as_str() == want).count() as u32
 }
 
 fn identity(n: usize) -> Vec<f64> {
@@ -388,22 +721,49 @@ mod tests {
     use crate::scenario::Scenario;
 
     #[test]
-    fn leo_generation_advances() {
+    fn pad_generation_advances() {
         let mut t = Trainer::new(11, true, 0.0);
-        t.scenario = Scenario::LeoDeorbit;
+        t.scenario = Scenario::Pad;
         t.start();
         let mut ticks = 0;
-        while t.generation < 1 && ticks < 32 {
+        while t.generation < 1 && ticks < 400 {
             t.tick(120_000.0);
             ticks += 1;
         }
         assert!(
             t.generation >= 1,
-            "LEO CMA-ES should finish a generation, gen={} eps={}",
+            "CMA-ES should finish a generation, gen={} eps={}",
             t.generation,
             t.episodes
         );
         assert!(t.episodes >= LAMBDA as u32);
         assert!(t.info().best_ever.is_finite());
+        assert_eq!(t.viz().prev.n, LAMBDA as u32);
+    }
+
+    #[test]
+    fn reset_policy_zeros_champion() {
+        let mut t = Trainer::new(1, true, 0.0);
+        t.best_weights[0] = 3.0;
+        t.generation = 9;
+        t.episodes = 120;
+        t.reset_policy();
+        assert_eq!(t.generation, 0);
+        assert_eq!(t.episodes, 0);
+        assert!(!t.running);
+        assert!(t.best_weights.iter().all(|w| *w == 0.0));
+    }
+
+    #[test]
+    fn retain_brain_keeps_mean() {
+        let mut t = Trainer::new(1, true, 0.0);
+        t.mean[0] = 0.42;
+        t.best_weights[0] = 0.42;
+        t.generation = 5;
+        t.retain_brain();
+        assert_eq!(t.generation, 0);
+        assert!((t.mean[0] - 0.42).abs() < 1e-12);
+        assert!((t.best_weights[0] - 0.42).abs() < 1e-12);
+        assert!(!t.promote_ready);
     }
 }

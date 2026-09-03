@@ -1,15 +1,10 @@
 # SpaceY
 
-Browser simulation of a **Falcon 9-class first stage** coming in from near-vacuum through a grid-fin atmospheric glide to a propulsive landing — and an in-browser **CMA-ES** trainer for a residual control policy.
+Browser gym for a **Falcon 9-class first stage**: 6DOF physics, grid-fin aero, cold-gas RCS, Merlin 1/3, and an in-browser **CMA-NeuroES** trainer.
 
-Two selectable scenarios:
+The mission is **RTLS**: recover the booster to LZ-1. Training starts as a 2D pad slam and auto-promotes through 2 km, 6DOF, wind, glide, then the full ~80 km RTLS start. The net sees only pad-frame pose, velocity, rates, and fuel, and writes throttle, gimbal, and grid fins.
 
-| Scenario | Start | Notes |
-|----------|--------|--------|
-| **RTLS** (default) | ~80 km, ~2.0–2.1 km/s Earth-relative | First-stage reentry after boostback. This is v1. |
-| **LEO deorbit** | ~220 km, **~7.8 km/s inertial** (~7.3–7.5 km/s ground), near-vacuum | Same vehicle from circular LEO-class energy: retrograde deorbit, hypersonic entry, grid-fin glide, propulsive landing. First stages do not actually reach orbit; this is the energy-class gap vs RTLS. |
-
-Physics and training run entirely in **Rust compiled to WASM**. The scene is **TypeScript + Three.js**. This is a normal `cargo` + `wasm-bindgen` + `vite` toolchain.
+Physics and training run in **Rust compiled to WASM**. The scene is **TypeScript + Three.js**.
 
 **Grok Build, the `grok` CLI, grok TUI, and any Grok Build / Grok coding-agent workflow are not part of this project.**
 
@@ -22,82 +17,80 @@ Prerequisites: Rust (stable) with `wasm32-unknown-unknown`, [`wasm-bindgen-cli`]
 ```bash
 cargo install wasm-bindgen-cli --version 0.2.100 --locked
 rustup target add wasm32-unknown-unknown
+unset CARGO_TARGET_DIR
 npm start
 ```
 
 That builds the WASM crate and serves the app at [http://localhost:5173](http://localhost:5173).
 
-Other scripts:
-
 | Command        | What it does                                      |
 |----------------|---------------------------------------------------|
-| `npm test`     | Native Rust unit tests (atmosphere, frames, episode termination, LEO start) |
+| `npm test`     | Native Rust unit tests                            |
 | `npm run build`| Production static build in `web/dist`             |
 
-CI on `main` and pull requests runs `cargo test -p spacey_sim` and a `wasm32-unknown-unknown` release build (fail closed if the crate does not compile).
+If `CARGO_TARGET_DIR` is set, bindgen can pick a stale wasm. Unset it so bindgen uses `target/wasm32-unknown-unknown/release/spacey_sim.wasm`.
 
 ## What the sim models
 
-- **6DOF rigid body** in ECI, with ECEF / geodetic conversions and a rotating Earth (WGS-84 + J2).
-- **US Standard Atmosphere 1976** (NASA-TM-X-74335 / NOAA-S/T 76-1562) from sea level through 86 km, exponential tail above.
-- **Aerodynamics**: Mach-dependent drag, AoA lift, grid fins as control surfaces, a combined CP that weathercocks tail-first. Coherent and dimensioned — not a NASA aero table.
-- **Propulsion**: up to three Merlin-class engines, throttle 40–100%, gimbal, Isp mix of SL/vac, fuel-mass depletion.
-- **Wind / weather**: layered Florida-east-coast caricature plus Ornstein–Uhlenbeck gusts. Optional **storm** (stronger surface flow, larger gusts, +10% density) and **shear** (amplified layer-to-layer speed/direction contrast, slightly thinner mid-atmosphere). Synthetic only — not live METAR.
-- **Destruction** (default **on**): max-Q, over-G, q-alpha, excessive AoA, spin, hard impact. Toggle in the UI.
-- **Fuel-to-land bound**: conservative analytic check once in the lower atmosphere / landing burn.
-- **Corridor**: ground-track crossrange from the start→pad line; tightens with altitude.
-- **Success**: upright, low residual speed, engines near LZ-1, vehicle intact.
+- **6DOF rigid body** in ECI, WGS-84 + J2, rotating Earth.
+- **US Standard Atmosphere 1976** from sea level through 86 km, exponential tail above.
+- **Three actuator families**
+  - **Merlins**: 1 or 3 engines, 40–100% throttle, 2-axis gimbal, Isp mix SL/vac. Once lit, a burn lasts ≥2.5 s; a restart waits ≥6 s. 10 Hz on/off is a relight, not a throttle.
+  - **Grid fins**: four lattices at the interstage, X-mixer, axial drag even at δ=0, weathercock from `r × F` (not a lumped CP hack).
+  - **RCS**: cold-gas inner loop for the **autopilot demo** only. Training (Policy) has RCS off so the net owns attitude.
+- **Wind / weather**: Florida-east-coast caricature + OU gusts. Optional storm / shear.
+- **Destruction** (default on): max-Q, over-G, q-alpha, AoA, spin, hard impact.
+- **Success**: engine ~12 m, ≲8 m/s, ≲4 m/s horizontal, within 20 m of the pad, ≲12° tilt, intact. A toy-soft landing, not a 26 m/s slap.
+
+## How training works
+
+The **policy is the controller**. A small tanh MLP (14 → 8 hidden → 6 actions, 174 weights) reads pad-ENU engine position, velocity, body→ENU quaternion, body rate, and fuel. It writes throttle (off or 40–100%), two-axis TVC, and three fin axes. Actions are held at **10 Hz**. The plant latches ignition (min burn / restart delay); extra relights cost fitness. One landing engine. No inner attitude PD, no wind/q/Mach/phase inputs, no reference trajectory in the observation.
+
+Weights are evolved with **CMA-ES** (CMA-NeuroES). No backprop. If fitness plateaus, one hidden unit is added (CMA-TWEANN style, new weights start at 0, covariance reset). Cap is 24 hidden so the browser covariance stays small.
+
+Zero weights keep engines **off**. CMA has to learn to light a Merlin. Promoting a stage **keeps** the champion weights and resets covariance.
+
+**Autopilot demo** is the old hand-written tracker on a full RTLS start. It is not in the training loop.
+
+Curriculum is internal. After three generations at ≥30% true lands, the trainer advances one stage:
+
+| Stage | Start | What the net must learn |
+|-------|--------|-------------------------|
+| 1 pad slam | ~80 m, nearly still, pitch plane | Light late, stay upright |
+| 2 2 km slam | ~2 km, 40–120 m/s down, ±200 m east | Ignition timing |
+| 3 6DOF | Same energy, full attitude | Both gimbals + roll fin |
+| 4 wind | 6DOF, unobserved ~1× wind | Infer gusts from velocity drift |
+| 5 glide | ~20 km, ~380 m/s | Fins, then the same slam |
+| 6 RTLS | ~80 km, ~2 km/s | Entry, glide, and landing |
+
+The green dashed line in the scene is a human-only slam/divert tube (`v* = √(2 a_eff h)` toward the pad). It is **not** an MLP input. Fitness adds a dense tracking cost plus the existing land jackpot.
+
+Population 128 is for the swarm view (Hansen’s default λ is ~20 at this dimension).
 
 ## Approximate vehicle numbers
-
-Cited from SpaceX Falcon 9 user's guide figures, FAA/environmental filings, and commonly quoted secondary summaries of those documents. Treat as order-of-magnitude.
 
 | Quantity | Value used | Notes |
 |----------|------------|--------|
 | Stage diameter | 3.66 m | Public |
 | Stage + interstage length | 47 m | Full stack ~70 m |
 | Stage-1 dry mass | 25 600 kg | Published estimates ~22–27 t |
-| Ascent propellant capacity | 395 700 kg | LOX + RP-1; **not** the start load |
-| Scenario start fuel | 40 000 kg RTLS / 78 000 kg LEO | After ascent + boostback; LEO carries more for the hypersonic capture + a pad-theater landing stash (still ≪ 396 t ascent) |
 | Merlin 1D SL / vac | 845 / 914 kN | Block 5 public figures |
 | Merlin 1D Isp SL / vac | 282 / 311 s | Same |
 | Landing / entry engines | 1 or 3 | Center or cluster |
-| Grid fins | 4 × ~1.8 m² | Titanium Block 5; photos / patents |
+| Grid fins | 4 × ~1.8 m² lattices | Titanium Block 5; photos / patents |
 | Pad | LZ-1, 28.4856°N 80.5444°W | Public coordinates |
-
-**RTLS** start is an **approximate first-stage reentry**: ~80 km, ~2.0–2.1 km/s Earth-relative, westbound toward LZ-1.
-
-**LEO** start is a circular ~220 km / ~7.8 km/s inertial state on a plane that overflies LZ-1 after a retrograde deorbit and a half-rev coast. Density at that altitude is thermospheric (~10⁻¹⁰ kg/m³). Use 100–250× time warp for the exoatmospheric coast. The same Merlin-class stack then flies hypersonic entry → grid fins → landing burn. Surviving 7.8 km/s on a first-stage airframe is the training problem — not a claim that Falcon 9 stages do this.
-
-The LEO **nominal** (zero residual, destruction on) is built to **soft-land at LZ-1** a meaningful fraction of the time: vacuum RCS holds tail-first through coast, the pad-ENU corridor is ignored until the landing theater, deorbit is a single-engine ~50 m/s burn that latches, and the entry law is a Q-hold plus an inbound-only capture burn. Periapsis is placed ~724 km west and slightly north of the pad so the ~500 km skip after a 5 km/s / 65 km overflight crosses LZ-1 (a due-east periapsis is the orbit apex and would walk ~27 km south). The Q-hold may spend down to a ~3.8 t stash so the pulse brakes instead of coasting into a 249 kPa spike; the landing burn then commits in the pad theater and suicide-brakes into the success box instead of hovering a T/W>1 stack at 1 km or sliding 50 km east. ECI→ECEF uses −ω t so a zero-ground-speed stack actually stays over LZ-1 (the opposite sign walked ~0.8 km/s east). LEO structural limits are higher than RTLS (Q 250 kPa / 18 g) — still fatal for an unburned 7.8 km/s dive, not a destruction-off cheat.
-
-Native and the **browser / wasm32** sim share one numeric path: software `libm`, `StdRng` (ChaCha — portable across pointer width), and altitude-only `adaptive_dt` (Q-threshold dt walked the skip when host vs wasm Q differed by 0.1%). `#5` attributed a ~600 m in-browser miss to libm; most of that was `SmallRng` (xoshiro256++ on 64-bit hosts, xoshiro128++ on wasm32) spawning seed 88 ~240 km apart. Documented seed **88**, destruction on, wind 0, warps to `TermReason::Success` (`landed`) in both `cargo test` and the in-browser `fast_forward` / warp loop.
-
-## How training works
-
-A **nominal tracker** (entry-burn energy management, tail-first weathercock / grid fins, hover-slam landing) is always running.
-
-On top of that, a **linear residual policy** (16 features → 6 actions: throttle, gimbal, fins; 102 weights) is trained with **CMA-ES** (rank-μ + rank-1 covariance, Cholesky sampling). No backprop. Population fitness is drawn in the HUD each generation.
-
-The display vehicle flies the current champion. Training evaluates a population of 12 in WASM between animation frames.
-
-Success score is large and positive; corridor / fuel / breakup / timeout are large negatives. CMA-ES is a later-PPO stand-in: it fits continuous control and parallelizes in the browser.
 
 ## Architecture
 
 ```
-crates/sim     Rust physics + CMA-ES  →  wasm32-unknown-unknown
+crates/sim     Rust physics + CMA-NeuroES  →  wasm32-unknown-unknown
 web/           Vite + TypeScript + Three.js
 ```
-
-Bevy-on-WASM was considered and skipped: longer compile, heavier download, no advantage for this scene.
 
 ## Controls
 
 - **Start training / Pause / Reset episode**
-- **Scenario**: RTLS (default) or LEO deorbit
-- **Destruction** toggle (default on)
-- **Storm / shear** weather toggles (on top of the wind scale)
-- **Wind** scale 0–2×
-- **Cameras**: chase, pad, orbital overview (orbital camera frames both pad and vehicle at Earth scale)
-- **Time warp**: 1 / 5 / 25 / 100 / 250× (needed for the LEO coast)
+- **Autopilot demo**: fly the scripted tracker on a full RTLS start
+- **Destruction / Storm / Shear / Wind**
+- **Cameras**: chase, pad, orbital
+- **Time warp**: 1 / 5 / 25 / 100 / 250×

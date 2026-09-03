@@ -1,9 +1,9 @@
 //! JavaScript surface: one `Engine` owns the display sim and the trainer.
 
 use crate::cmaes::Trainer;
-use crate::guidance::N_WEIGHTS;
+use crate::policy::n_weights;
 use crate::scenario::Scenario;
-use crate::sim::Sim;
+use crate::sim::{Pilot, Sim};
 use crate::wind::Weather;
 use wasm_bindgen::prelude::*;
 
@@ -18,6 +18,7 @@ pub struct Engine {
     weather: Weather,
     seed: u32,
     watch_best: bool,
+    autopilot: bool,
 }
 
 #[wasm_bindgen]
@@ -26,12 +27,16 @@ impl Engine {
     pub fn new() -> Engine {
         let seed = 7;
         let destroy = true;
-        let wind_scale = 1.0;
-        let scenario = Scenario::Rtls;
+        let wind_scale = 0.0;
+        let scenario = Scenario::Pad;
         let weather = Weather::default();
+        let mut display = Sim::new_with(seed, destroy, wind_scale, scenario, weather);
+        display.pilot = Pilot::Policy;
+        let mut trainer = Trainer::new(seed.wrapping_add(99), destroy, wind_scale);
+        trainer.scenario = scenario;
         Engine {
-            display: Sim::new_with(seed, destroy, wind_scale, scenario, weather),
-            trainer: Trainer::new(seed.wrapping_add(99), destroy, wind_scale),
+            display,
+            trainer,
             time_warp: 1.0,
             destroy,
             wind_scale,
@@ -39,12 +44,32 @@ impl Engine {
             weather,
             seed,
             watch_best: true,
+            autopilot: false,
+        }
+    }
+
+    fn display_scenario(&self) -> Scenario {
+        if self.autopilot {
+            Scenario::Rtls
+        } else {
+            self.scenario
         }
     }
 
     fn rebuild_display(&mut self, seed: u32) {
-        let mut sim = Sim::new_with(seed, self.destroy, self.wind_scale, self.scenario, self.weather);
-        if self.watch_best {
+        let mut sim = Sim::new_with(
+            seed,
+            self.destroy,
+            self.wind_scale,
+            self.display_scenario(),
+            self.weather,
+        );
+        sim.pilot = if self.autopilot {
+            Pilot::Autopilot
+        } else {
+            Pilot::Policy
+        };
+        if self.watch_best && !self.autopilot {
             sim.set_weights(self.trainer.best_weights());
         }
         self.display = sim;
@@ -69,6 +94,7 @@ impl Engine {
         self.trainer.wind_scale = s;
     }
 
+    /// Internal: keep champion weights when the trainer advances a stage.
     pub fn set_scenario(&mut self, id: u32) {
         let next = Scenario::from_id(id);
         if next == self.scenario {
@@ -76,6 +102,10 @@ impl Engine {
         }
         self.scenario = next;
         self.trainer.scenario = next;
+        self.trainer.weather = self.weather;
+        self.trainer.destroy = self.destroy;
+        self.trainer.wind_scale = self.wind_scale;
+        self.trainer.retain_brain();
         self.rebuild_display(self.seed);
     }
 
@@ -125,18 +155,22 @@ impl Engine {
         self.trainer.running
     }
 
-    /// Spend up to `budget_ms` evaluating CMA-ES candidates. After a generation
-    /// completes, the display vehicle is reset onto the current champion.
+    /// Spend up to `budget_ms` evaluating CMA-ES candidates.
+    /// Display is *not* rewound each generation — the swarm view owns that.
+    /// A new champion or a stage promote does restart the hero vehicle from T+0.
     pub fn train_for_ms(&mut self, budget_ms: f64) -> bool {
         let finished = self.trainer.tick(budget_ms.max(1.0));
-        if finished && self.watch_best {
+        if self.trainer.take_promoted() {
+            self.scenario = self.trainer.scenario;
+            self.wind_scale = self.trainer.wind_scale;
+            self.rebuild_display(self.seed.wrapping_add(self.trainer.generation));
+        } else if self.trainer.took_new_best() && self.watch_best {
             self.reset(self.seed.wrapping_add(self.trainer.generation));
         }
         finished
     }
 
     /// Step with native `adaptive_dt` until term or `max_s` of sim time.
-    /// Used so a 250× browser coast matches `cargo` / unit tests.
     pub fn fast_forward(&mut self, max_s: f64) {
         let t0 = self.display.t;
         let limit = max_s.clamp(0.0, 8_000.0);
@@ -154,15 +188,13 @@ impl Engine {
     /// includes the caller's frame Δt; warp is applied here).
     pub fn step_display(&mut self, dt: f64) {
         if self.display.terminated() {
-            return;
+            if self.trainer.running {
+                self.rebuild_display(self.seed.wrapping_add(self.trainer.episodes + 1));
+            } else {
+                return;
+            }
         }
-        // Orbital coast at 250× needs more than 4 s of sim per frame.
-        // Always take a full adaptive_dt — trimming the last slice to
-        // `remain` desynchronizes the 2800 s LEO coast from native
-        // (seed 88 landed at 20 m native, missed by 550 m in the
-        // browser at 250×).
-        let cap = if self.scenario.is_orbital() { 12.0 } else { 4.0 };
-        let budget = (dt * self.time_warp).clamp(0.0, cap);
+        let budget = (dt * self.time_warp).clamp(0.0, 4.0);
         let mut used = 0.0;
         while used < budget && !self.display.terminated() {
             let h = self.display.adaptive_dt();
@@ -175,29 +207,48 @@ impl Engine {
         serde_json::to_string(&self.display.snapshot()).unwrap_or_else(|_| "{}".into())
     }
 
+    /// JS object snapshot — avoids `JSON.parse` of a string every frame.
+    pub fn snapshot(&self) -> JsValue {
+        let mut snap = self.display.snapshot();
+        if !snap.periapsis_alt.is_finite() {
+            snap.periapsis_alt = 1.0e12;
+        }
+        serde_wasm_bindgen::to_value(&snap).unwrap_or(JsValue::NULL)
+    }
+
     pub fn train_json(&self) -> String {
         serde_json::to_string(&self.trainer.info()).unwrap_or_else(|_| "{}".into())
     }
 
+    pub fn train_info(&self) -> JsValue {
+        serde_wasm_bindgen::to_value(&self.trainer.info()).unwrap_or(JsValue::NULL)
+    }
+
+    pub fn generation_viz(&self) -> JsValue {
+        serde_wasm_bindgen::to_value(&self.trainer.viz()).unwrap_or(JsValue::NULL)
+    }
+
+    pub fn set_autopilot(&mut self, enabled: bool) {
+        self.autopilot = enabled;
+        self.rebuild_display(self.seed);
+    }
+
+    pub fn autopilot(&self) -> bool {
+        self.autopilot
+    }
+
     pub fn n_weights(&self) -> u32 {
-        N_WEIGHTS as u32
+        n_weights(self.trainer.hidden()) as u32
     }
 }
 
-/// Run a zero-residual LEO episode with the same `adaptive_dt` loop as
-/// `cargo test` / `Engine::fast_forward`. Used to measure native vs
-/// wasm32 skip drift (and to assert a documented seed lands in-browser).
+/// Zero-weight pad policy on the wasm32 numeric path. CI asserts this
+/// does *not* land — the gym must not be a scripted skip.
 #[wasm_bindgen]
-pub fn run_leo_nominal(seed: u32, destroy: bool, wind_scale: f64, max_steps: u32) -> String {
-    use crate::sim::run_leo_nominal_snapshot;
-    serde_json::to_string(&run_leo_nominal_snapshot(seed, destroy, wind_scale, max_steps))
+pub fn run_hover_policy(seed: u32, destroy: bool, wind_scale: f64, max_steps: u32) -> String {
+    use crate::sim::run_hover_policy_snapshot;
+    serde_json::to_string(&run_hover_policy_snapshot(seed, destroy, wind_scale, max_steps))
         .unwrap_or_else(|_| "{}".into())
-}
-
-#[wasm_bindgen]
-pub fn run_leo_until(seed: u32, destroy: bool, wind_scale: f64, until_t: f64) -> String {
-    use crate::sim::run_leo_until as run;
-    serde_json::to_string(&run(seed, destroy, wind_scale, until_t)).unwrap_or_else(|_| "{}".into())
 }
 
 impl Default for Engine {

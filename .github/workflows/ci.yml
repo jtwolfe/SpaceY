@@ -27,8 +27,8 @@ jobs:
       - name: wasm-bindgen CLI
         run: cargo install wasm-bindgen-cli --version 0.2.100 --locked
 
-      - name: wasm32 LEO seed 88 lands
+      - name: wasm32 pad gym (zero policy does not land)
         run: |
-          wasm-bindgen --target nodejs --out-dir target/leo-wasm-check --out-name spacey \
+          wasm-bindgen --target nodejs --out-dir target/wasm-gym-check --out-name spacey \
             target/wasm32-unknown-unknown/release/spacey_sim.wasm
-          node scripts/leo_wasm_check.mjs 88
+          node scripts/wasm_gym_check.mjs 1

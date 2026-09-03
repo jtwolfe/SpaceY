@@ -1,8 +1,7 @@
 //! Small f64 linear-algebra helpers. Positions are Earth-radius scale; f64 is required.
 //!
-//! Transcendentals go through the `libm` crate on **every** target so the
-//! LEO skip is bit-identical between `cargo test` and the wasm32 browser
-//! build. Host libm (glibc) vs wasm compiler-rt is a ~600 m skip bias.
+//! Transcendentals go through the `libm` crate on **every** target so
+//! native tests and the wasm32 browser share one numeric path.
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Vec3 {
@@ -149,6 +148,55 @@ impl Quat {
             x: a.x * s,
             y: a.y * s,
             z: a.z * s,
+        }
+    }
+
+    /// Body→world quaternion from the images of the body axes (columns of R).
+    pub fn from_axes(x: Vec3, y: Vec3, z: Vec3) -> Self {
+        let m00 = x.x;
+        let m10 = x.y;
+        let m20 = x.z;
+        let m01 = y.x;
+        let m11 = y.y;
+        let m21 = y.z;
+        let m02 = z.x;
+        let m12 = z.y;
+        let m22 = z.z;
+        let tr = m00 + m11 + m22;
+        let q = if tr > 0.0 {
+            let s = 0.5 / sqrt(tr + 1.0);
+            Self::new(0.25 / s, (m21 - m12) * s, (m02 - m20) * s, (m10 - m01) * s)
+        } else if m00 >= m11 && m00 >= m22 {
+            let s = 2.0 * sqrt((1.0 + m00 - m11 - m22).max(0.0));
+            if s < 1e-18 {
+                Self::IDENTITY
+            } else {
+                Self::new((m21 - m12) / s, 0.25 * s, (m01 + m10) / s, (m02 + m20) / s)
+            }
+        } else if m11 >= m22 {
+            let s = 2.0 * sqrt((1.0 + m11 - m00 - m22).max(0.0));
+            if s < 1e-18 {
+                Self::IDENTITY
+            } else {
+                Self::new((m02 - m20) / s, (m01 + m10) / s, 0.25 * s, (m12 + m21) / s)
+            }
+        } else {
+            let s = 2.0 * sqrt((1.0 + m22 - m00 - m11).max(0.0));
+            if s < 1e-18 {
+                Self::IDENTITY
+            } else {
+                Self::new((m10 - m01) / s, (m02 + m20) / s, (m12 + m21) / s, 0.25 * s)
+            }
+        };
+        q.normalized()
+    }
+
+    /// Flip the double-cover so `w >= 0` (stable as an MLP input).
+    pub fn hemisphere(self) -> Self {
+        if self.w < 0.0 {
+            Self::new(-self.w, -self.x, -self.y, -self.z)
+        } else {
+            self
         }
     }
 
@@ -320,5 +368,23 @@ mod tests {
         assert!(x.is_finite());
         assert!((super::sqrt(4.0) - 2.0).abs() < 1e-15);
         assert!((super::exp(0.0) - 1.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn from_axes_identity_and_known_rotation() {
+        let q0 = super::Quat::from_axes(super::Vec3::X, super::Vec3::Y, super::Vec3::Z);
+        assert!((q0.w - 1.0).abs() < 1e-12);
+        assert!(q0.x.abs() < 1e-12 && q0.y.abs() < 1e-12 && q0.z.abs() < 1e-12);
+
+        let q = super::Quat::from_axis_angle(super::Vec3::Y, 0.4);
+        let x = q.rotate(super::Vec3::X);
+        let y = q.rotate(super::Vec3::Y);
+        let z = q.rotate(super::Vec3::Z);
+        let q2 = super::Quat::from_axes(x, y, z).hemisphere();
+        let q1 = q.hemisphere();
+        assert!((q1.w - q2.w).abs() < 1e-9);
+        assert!((q1.x - q2.x).abs() < 1e-9);
+        assert!((q1.y - q2.y).abs() < 1e-9);
+        assert!((q1.z - q2.z).abs() < 1e-9);
     }
 }
