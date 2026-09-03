@@ -289,6 +289,20 @@ impl Engine {
         self.rebuild_display(self.seed.wrapping_add(self.trainer.generation));
         true
     }
+
+    /// Wipe the saved CMA brain and restart at pad slam.
+    pub fn reset_brain(&mut self) {
+        self.trainer.reset_brain();
+        self.scenario = self.trainer.scenario;
+        self.rebuild_display(self.seed);
+    }
+
+    /// Undo the current curriculum stage (restore last promote snapshot).
+    pub fn reset_latest_phase(&mut self) {
+        self.trainer.reset_latest_phase();
+        self.scenario = self.trainer.scenario;
+        self.rebuild_display(self.seed);
+    }
 }
 
 /// Zero-weight pad policy on the wasm32 numeric path. CI asserts this

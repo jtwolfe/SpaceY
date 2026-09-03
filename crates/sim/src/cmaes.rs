@@ -167,6 +167,8 @@ pub struct Trainer {
     mix_left: u32,
     mix_next: Option<Scenario>,
     mix_hard_pad: bool,
+    /// Champion that earned the last promote — used to undo the current stage.
+    stage_anchor: Option<StageAnchor>,
 }
 
 impl Trainer {
@@ -227,6 +229,7 @@ impl Trainer {
             mix_left: 0,
             mix_next: None,
             mix_hard_pad: false,
+            stage_anchor: None,
         }
     }
 
@@ -257,6 +260,7 @@ impl Trainer {
         self.mix_left = 0;
         self.mix_next = None;
         self.mix_hard_pad = false;
+        self.stage_anchor = None;
         let n = n_weights(self.hidden);
         self.running = false;
         self.generation = 0;
@@ -325,12 +329,77 @@ impl Trainer {
         }
     }
 
+    fn capture_stage_anchor(&mut self) {
+        self.stage_anchor = Some(StageAnchor {
+            weights: self.best_weights.clone(),
+            mean: self.mean.clone(),
+            hidden: self.hidden as u32,
+            sigma: self.sigma,
+        });
+    }
+
+    fn apply_stage_anchor(&mut self, anchor: &StageAnchor) -> bool {
+        let hidden = (anchor.hidden as usize).clamp(HIDDEN_START, HIDDEN_MAX);
+        let n = n_weights(hidden);
+        if anchor.weights.len() != n || anchor.mean.len() != n {
+            return false;
+        }
+        self.hidden = hidden;
+        self.best_weights = anchor.weights.clone();
+        self.mean = anchor.mean.clone();
+        self.sigma = anchor.sigma.clamp(0.02, 1.4);
+        true
+    }
+
+    /// Wipe the net and CMA state, return to pad slam.
+    pub fn reset_brain(&mut self) {
+        let running = self.running;
+        let destroy = self.destroy;
+        let wind_scale = self.wind_scale;
+        let pin_storm = self.pin_storm;
+        let pin_shear = self.pin_shear;
+        self.reset_policy();
+        self.scenario = Scenario::Pad;
+        self.destroy = destroy;
+        self.wind_scale = wind_scale;
+        self.pin_storm = pin_storm;
+        self.pin_shear = pin_shear;
+        if running {
+            self.start();
+        }
+    }
+
+    /// Undo training on the current stage. Restores the last promote snapshot
+    /// when one exists; otherwise drops back one curriculum gate.
+    pub fn reset_latest_phase(&mut self) {
+        let running = self.running;
+        if let Some(anchor) = self.stage_anchor.clone() {
+            if self.apply_stage_anchor(&anchor) {
+                let sigma = self.sigma;
+                self.retain_brain();
+                self.sigma = sigma;
+                if running && self.pending.is_empty() {
+                    self.sample_generation();
+                }
+                return;
+            }
+        }
+        if let Some(prev) = self.scenario.prev_gate() {
+            self.scenario = prev;
+            self.stage_anchor = None;
+            self.retain_brain();
+            return;
+        }
+        self.reset_brain();
+    }
+
     /// Advance one training stage, keep champion weights, reset covariance.
     fn commit_promote(&mut self) -> bool {
         let Some(next) = self.mix_next.take() else {
             self.promote_ready = false;
             return false;
         };
+        self.capture_stage_anchor();
         self.mix_left = 0;
         self.mix_hard_pad = false;
         self.scenario = next;
@@ -705,6 +774,7 @@ impl Trainer {
                 0.0
             },
             sigma: self.sigma,
+            anchor: self.stage_anchor.clone(),
         };
         serde_json::to_string(&blob).unwrap_or_else(|_| "{}".into())
     }
@@ -741,6 +811,11 @@ impl Trainer {
         self.pending_y.clear();
         self.pending_f.clear();
         self.eval_index = 0;
+        self.stage_anchor = blob.anchor.filter(|a| {
+            let h = (a.hidden as usize).clamp(HIDDEN_START, HIDDEN_MAX);
+            let an = n_weights(h);
+            a.weights.len() == an && a.mean.len() == an
+        });
         true
     }
 }
@@ -754,6 +829,16 @@ struct BrainBlob {
     stage: u32,
     generation: u32,
     best_ever: f64,
+    sigma: f64,
+    #[serde(default)]
+    anchor: Option<StageAnchor>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StageAnchor {
+    weights: Vec<f64>,
+    mean: Vec<f64>,
+    hidden: u32,
     sigma: f64,
 }
 
@@ -884,6 +969,46 @@ mod tests {
     }
 
     #[test]
+    fn reset_brain_returns_to_pad() {
+        let mut t = Trainer::new(1, true, 1.0);
+        t.scenario = Scenario::Attitude;
+        t.best_weights[0] = 0.8;
+        t.running = true;
+        t.reset_brain();
+        assert_eq!(t.scenario, Scenario::Pad);
+        assert!(t.best_weights.iter().all(|w| *w == 0.0));
+        assert!(t.running);
+        assert!((t.wind_scale - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn reset_latest_phase_restores_promote_snapshot() {
+        let mut t = Trainer::new(1, true, 0.0);
+        t.best_weights[0] = 0.41;
+        t.mean[0] = 0.41;
+        t.mix_next = Some(Scenario::Attitude);
+        assert!(t.commit_promote());
+        assert_eq!(t.scenario, Scenario::Attitude);
+        t.best_weights[0] = 0.99;
+        t.mean[0] = 0.99;
+        t.reset_latest_phase();
+        assert_eq!(t.scenario, Scenario::Attitude);
+        assert!((t.best_weights[0] - 0.41).abs() < 1e-12);
+        assert!((t.mean[0] - 0.41).abs() < 1e-12);
+    }
+
+    #[test]
+    fn reset_latest_phase_without_snapshot_demotes() {
+        let mut t = Trainer::new(1, true, 0.0);
+        t.scenario = Scenario::Attitude;
+        t.best_weights[0] = 0.2;
+        t.mean[0] = 0.2;
+        t.reset_latest_phase();
+        assert_eq!(t.scenario, Scenario::Slam);
+        assert!((t.best_weights[0] - 0.2).abs() < 1e-12);
+    }
+
+    #[test]
     fn retain_brain_keeps_mean() {
         let mut t = Trainer::new(1, true, 0.0);
         t.mean[0] = 0.42;
@@ -902,11 +1027,15 @@ mod tests {
         t.best_weights[0] = 0.31;
         t.mean[0] = 0.31;
         t.generation = 4;
+        t.capture_stage_anchor();
         let json = t.export_brain();
         let mut u = Trainer::new(2, true, 1.0);
         assert!(u.import_brain(&json));
         assert!((u.best_weights[0] - 0.31).abs() < 1e-12);
         assert_eq!(u.generation, 4);
+        u.best_weights[0] = 0.9;
+        u.reset_latest_phase();
+        assert!((u.best_weights[0] - 0.31).abs() < 1e-12);
         assert!(!u.import_brain("{}"));
     }
 }

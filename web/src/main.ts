@@ -10,6 +10,8 @@ type WasmEngine = Engine & {
   autopilot?: () => boolean;
   export_brain?: () => string;
   import_brain?: (json: string) => boolean;
+  reset_brain?: () => void;
+  reset_latest_phase?: () => void;
 };
 
 const BRAIN_KEY = "spacey-brain-v3";
@@ -32,6 +34,14 @@ function restoreBrain(engine: WasmEngine) {
     }
   } catch {
     /* ignore */
+  }
+}
+
+function clearBrain() {
+  try {
+    localStorage.removeItem(BRAIN_KEY);
+  } catch {
+    /* quota / private mode */
   }
 }
 
@@ -331,6 +341,18 @@ async function main() {
     document.querySelector(`.cam[data-cam="${mode}"]`)?.classList.add("on");
     scene?.setCamMode(mode);
   };
+  document.querySelector("#btn-reset-brain")!.addEventListener("click", () => {
+    engine.reset_brain?.();
+    clearBrain();
+    scene?.resetTrail();
+    lastStageN = 0;
+    setCamUi("pad");
+  });
+  document.querySelector("#btn-reset-phase")!.addEventListener("click", () => {
+    engine.reset_latest_phase?.();
+    persistBrain(engine);
+    scene?.resetTrail();
+  });
   document.querySelector("#tog-autopilot")?.addEventListener("change", (e) => {
     const on = (e.target as HTMLInputElement).checked;
     engine.set_autopilot?.(on);

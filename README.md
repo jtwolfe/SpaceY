@@ -90,6 +90,8 @@ web/           Vite + TypeScript + Three.js
 ## Controls
 
 - **Start training / Pause / Reset episode**
+- **Reset**: wipe the saved CMA brain in this browser and restart pad slam (hard-reload does not)
+- **Reset latest phase**: undo the current stage using the last promote snapshot; drops back one gate if there is no snapshot
 - **Autopilot demo**: fly the scripted tracker on a full RTLS start
 - **Destruction / Storm / Shear / Wind** (storm/shear pin; wind is nominal intensity)
 - **Cameras**: chase, pad, orbital

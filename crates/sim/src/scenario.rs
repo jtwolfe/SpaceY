@@ -112,6 +112,17 @@ impl Scenario {
         }
     }
 
+    pub fn prev_gate(self) -> Option<Scenario> {
+        match self {
+            Scenario::Pad => None,
+            Scenario::Slam => Some(Scenario::Pad),
+            Scenario::Attitude => Some(Scenario::Slam),
+            Scenario::Wind => Some(Scenario::Attitude),
+            Scenario::Glide => Some(Scenario::Wind),
+            Scenario::Rtls => Some(Scenario::Glide),
+        }
+    }
+
     pub fn spawn(self, rng: &mut impl Rng) -> Spawn {
         self.spawn_var(rng, false)
     }
@@ -351,6 +362,8 @@ mod tests {
         assert!(Scenario::Wind.domain_rand_wind());
         assert_eq!(Scenario::Pad.next_gate(), Some(Scenario::Slam));
         assert_eq!(Scenario::Rtls.next_gate(), None);
+        assert_eq!(Scenario::Attitude.prev_gate(), Some(Scenario::Slam));
+        assert_eq!(Scenario::Pad.prev_gate(), None);
         assert_eq!(STAGE_COUNT, 6);
     }
 
