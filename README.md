@@ -40,7 +40,7 @@ If `CARGO_TARGET_DIR` is set, bindgen can pick a stale wasm. Unset it so bindgen
   - **RCS**: policy-owned cold-gas commands (Q-fade, no inner PD). Off during 2D pad/2 km (plane-lock); 6DOF and vacuum can use it. Autopilot demo still uses its own rate loop.
 - **Wind / weather**: Florida-east-coast caricature + OU gusts. Training samples **intensity and heading** every episode (stage-scaled). Pad stays nearly calm (≲0.25× the slider); real breeze starts at the Wind stage, and pad mixes two windier gens before promoting. Storm/shear HUD boxes **pin** that bit on; the wind slider is the nominal intensity (default **1×**). Wind is not an MLP input.
 - **Destruction** (default on): max-Q, over-G, q-alpha, AoA, spin, hard impact.
-- **Success**: ground contact, engine ≲12 m, ≲8 m/s, ≲4 m/s horizontal, within 20 m of the pad, ≲8° tilt, intact. Hovering in the volume is not a land.
+- **Success**: ground contact, engine ≲12 m, ≲8 m/s, ≲4 m/s horizontal, within 20 m of the pad, ≲8° tilt, intact. Hovering in the volume is not a land. Fuel-out, hang, or breakup still in the air is scored like refusing to come down; a sit-down on the pad is the cheapest miss.
 
 ## How training works
 

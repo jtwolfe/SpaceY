@@ -802,9 +802,9 @@ pub fn episode_fitness(sim: &Sim) -> f64 {
     if sim.destroy_reason == DestroyReason::GroundImpact {
         f -= 700.0;
     }
-    // Min throttle T/W > 1, so "light and climb until timeout" otherwise
-    // beats a pad slap. Hanging is not a land.
-    if matches!(sim.term, TermReason::Timeout | TermReason::None) && n.engine_alt > 0.4 {
+    // Airborne non-contact misses (fuel-out, hang, in-air breakup, corridor)
+    // must not beat a slap. Contact outcomes have engine_alt < 0.4.
+    if sim.term != TermReason::Success && n.engine_alt > 0.4 {
         f -= 4_200.0 + 6.0 * n.engine_alt.min(800.0);
     }
     f - relight_penalty(sim)
@@ -1152,6 +1152,91 @@ mod tests {
         assert!(
             up < hit,
             "timeout-high {up} should lose to ground impact {hit}"
+        );
+    }
+
+    fn hop_base() -> Sim {
+        Sim::new_with(1, true, 0.0, Scenario::Attitude, Weather::default())
+    }
+
+    fn airborne_at(mut sim: Sim, term: TermReason, alt: f64, speed: f64) -> Sim {
+        sim.term = term;
+        sim.last_nav.engine_alt = alt;
+        sim.last_nav.alt = alt + 30.0;
+        sim.last_nav.speed = speed;
+        sim.last_nav.v_enu = Vec3::new(0.0, 0.0, speed);
+        sim.last_nav.tilt = 0.05;
+        sim.last_nav.fuel = 20.0;
+        sim.fuel = 20.0;
+        sim
+    }
+
+    fn ground_slap(mut sim: Sim) -> Sim {
+        sim.term = TermReason::Destroyed;
+        sim.destroy_reason = DestroyReason::GroundImpact;
+        sim.last_nav.engine_alt = 0.2;
+        sim.last_nav.alt = 25.0;
+        sim.last_nav.speed = 42.0;
+        sim.last_nav.v_enu = Vec3::new(0.0, 0.0, -42.0);
+        sim.last_nav.tilt = 0.05;
+        sim
+    }
+
+    fn ground_miss(mut sim: Sim) -> Sim {
+        sim.term = TermReason::GroundMiss;
+        sim.destroy_reason = DestroyReason::None;
+        sim.last_nav.engine_alt = 0.2;
+        sim.last_nav.alt = 25.0;
+        sim.last_nav.speed = 12.0;
+        sim.last_nav.v_enu = Vec3::new(0.0, 0.0, -12.0);
+        sim.last_nav.tilt = 0.08;
+        sim
+    }
+
+    #[test]
+    fn fuel_out_high_loses_to_a_slap() {
+        let climb = airborne_at(
+            hop_base(),
+            TermReason::FuelInfeasible,
+            400.0,
+            40.0,
+        );
+        let slap = ground_slap(hop_base());
+        let up = episode_fitness(&climb);
+        let hit = episode_fitness(&slap);
+        assert!(
+            up < hit,
+            "fuel-out-high {up} should lose to slap {hit}"
+        );
+    }
+
+    #[test]
+    fn airborne_spin_loses_to_a_slap() {
+        let mut spin = airborne_at(hop_base(), TermReason::Destroyed, 400.0, 40.0);
+        spin.destroy_reason = DestroyReason::Spin;
+        let slap = ground_slap(hop_base());
+        let air = episode_fitness(&spin);
+        let hit = episode_fitness(&slap);
+        assert!(
+            air < hit,
+            "airborne spin {air} should lose to slap {hit}"
+        );
+    }
+
+    #[test]
+    fn ground_miss_beats_airborne_fuel_out() {
+        let miss = ground_miss(hop_base());
+        let climb = airborne_at(
+            hop_base(),
+            TermReason::FuelInfeasible,
+            400.0,
+            40.0,
+        );
+        let sit = episode_fitness(&miss);
+        let up = episode_fitness(&climb);
+        assert!(
+            sit > up,
+            "sit-down miss {sit} should beat fuel-out-high {up}"
         );
     }
 
