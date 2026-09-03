@@ -766,7 +766,14 @@ pub fn episode_fitness(sim: &Sim) -> f64 {
     f -= 50.0 * n.tilt.min(1.6);
     f -= 4.0 * n.range_h.min(250.0);
     f -= 20.0 * sim.max_rate.min(3.0);
-    f -= 2_000.0 * (sim.max_tilt - 0.20).max(0.0).min(1.5);
+    // Hops: tilt at contact. Peak tilt mid-burn made a 6DOF suicide burn
+    // lose to a fins-straight dart. Glide/RTLS still pay peak (entry cartwheel).
+    let tilt_fee = if sim.scenario.is_terminal_hop() {
+        n.tilt
+    } else {
+        sim.max_tilt
+    };
+    f -= 2_000.0 * (tilt_fee - 0.20).max(0.0).min(1.5);
     // Long-flight terms (tiny on a pad hop).
     f -= 0.022 * range.min(120_000.0);
     f -= 0.018 * closest.min(120_000.0);
@@ -806,6 +813,14 @@ pub fn episode_fitness(sim: &Sim) -> f64 {
     // must not beat a slap. Contact outcomes have engine_alt < 0.4.
     if sim.term != TermReason::Success && n.engine_alt > 0.4 {
         f -= 4_200.0 + 6.0 * n.engine_alt.min(800.0);
+    }
+    // Hops: a fast upright slap must lose to a slower, slightly messier burn.
+    // Cap so a 42 m/s dart still beats a 400 m hang.
+    if sim.scenario.is_terminal_hop()
+        && sim.term != TermReason::Success
+        && n.engine_alt < 0.4
+    {
+        f -= 80.0 * (n.speed - SUCCESS_SPEED_MPS).max(0.0).min(70.0);
     }
     f - relight_penalty(sim)
 }
@@ -1193,6 +1208,30 @@ mod tests {
         sim
     }
 
+    fn cartwheel_contact(mut sim: Sim) -> Sim {
+        sim.term = TermReason::Destroyed;
+        sim.destroy_reason = DestroyReason::Spin;
+        sim.last_nav.engine_alt = 0.2;
+        sim.last_nav.alt = 25.0;
+        sim.last_nav.speed = 42.0;
+        sim.last_nav.v_enu = Vec3::new(0.0, 0.0, -42.0);
+        sim.last_nav.tilt = 0.80;
+        sim.max_tilt = 0.80;
+        sim
+    }
+
+    fn slower_destroy_with_peak_tilt(mut sim: Sim) -> Sim {
+        sim.term = TermReason::Destroyed;
+        sim.destroy_reason = DestroyReason::GroundImpact;
+        sim.last_nav.engine_alt = 0.2;
+        sim.last_nav.alt = 25.0;
+        sim.last_nav.speed = 25.0;
+        sim.last_nav.v_enu = Vec3::new(0.0, 0.0, -25.0);
+        sim.last_nav.tilt = 0.05;
+        sim.max_tilt = 0.70;
+        sim
+    }
+
     #[test]
     fn fuel_out_high_loses_to_a_slap() {
         let climb = airborne_at(
@@ -1237,6 +1276,54 @@ mod tests {
         assert!(
             sit > up,
             "sit-down miss {sit} should beat fuel-out-high {up}"
+        );
+    }
+
+    #[test]
+    fn ground_miss_beats_a_dart() {
+        let sit = episode_fitness(&ground_miss(hop_base()));
+        let dart = episode_fitness(&ground_slap(hop_base()));
+        assert!(sit > dart, "sit-down {sit} should beat dart {dart}");
+    }
+
+    #[test]
+    fn dart_beats_hang_timeout() {
+        let hang = airborne_at(hop_base(), TermReason::Timeout, 400.0, 6.0);
+        let dart = ground_slap(hop_base());
+        let up = episode_fitness(&hang);
+        let hit = episode_fitness(&dart);
+        assert!(up < hit, "hang-timeout {up} should lose to dart {hit}");
+    }
+
+    #[test]
+    fn cartwheel_contact_loses_to_a_dart() {
+        let cart = episode_fitness(&cartwheel_contact(hop_base()));
+        let dart = episode_fitness(&ground_slap(hop_base()));
+        assert!(
+            cart < dart,
+            "cartwheel contact {cart} should lose to dart {dart}"
+        );
+    }
+
+    #[test]
+    fn peak_tilt_sitdown_still_beats_a_dart() {
+        let mut sit = ground_miss(hop_base());
+        sit.max_tilt = 0.70;
+        let slow = episode_fitness(&sit);
+        let dart = episode_fitness(&ground_slap(hop_base()));
+        assert!(
+            slow > dart,
+            "sit-down with mid-burn tilt {slow} should still beat dart {dart}"
+        );
+    }
+
+    #[test]
+    fn slower_destroy_with_peak_tilt_beats_a_dart() {
+        let burn = episode_fitness(&slower_destroy_with_peak_tilt(hop_base()));
+        let dart = episode_fitness(&ground_slap(hop_base()));
+        assert!(
+            burn > dart,
+            "slower destroy with peak tilt {burn} should beat dart {dart}"
         );
     }
 
