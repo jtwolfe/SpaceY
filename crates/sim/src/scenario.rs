@@ -227,36 +227,17 @@ fn spawn_pad(rng: &mut impl Rng, hard: bool) -> Spawn {
 
 fn spawn_slam_2d(rng: &mut impl Rng) -> Spawn {
     let alt = 2_050.0 + 80.0 * (rng.gen::<f64>() - 0.5);
-    let vx = 8.0 * (rng.gen::<f64>() - 0.5);
-    let vz = -(40.0 + 80.0 * rng.gen::<f64>());
+    let v = slam_enu_vel(rng, true);
     let e = 200.0 * (rng.gen::<f64>() - 0.5);
-    spawn_upright(
-        rng,
-        alt,
-        Vec3::new(vx, 0.0, vz),
-        e,
-        0.0,
-        SUICIDE_FUEL_KG,
-        true,
-    )
+    spawn_upright(rng, alt, v, e, 0.0, SUICIDE_FUEL_KG, true)
 }
 
 fn spawn_slam_6dof(rng: &mut impl Rng) -> Spawn {
     let alt = 2_050.0 + 80.0 * (rng.gen::<f64>() - 0.5);
-    let vx = 8.0 * (rng.gen::<f64>() - 0.5);
-    let vy = 8.0 * (rng.gen::<f64>() - 0.5);
-    let vz = -(40.0 + 80.0 * rng.gen::<f64>());
+    let v = slam_enu_vel(rng, false);
     let e = 200.0 * (rng.gen::<f64>() - 0.5);
     let n = 200.0 * (rng.gen::<f64>() - 0.5);
-    let mut s = spawn_upright(
-        rng,
-        alt,
-        Vec3::new(vx, vy, vz),
-        e,
-        n,
-        SUICIDE_FUEL_KG,
-        false,
-    );
+    let mut s = spawn_upright(rng, alt, v, e, n, SUICIDE_FUEL_KG, false);
     let pad = pad_geodetic();
     let (east, north, _up) = enu_basis(pad.lat, pad.lon);
     let tilt = (5.0 + 10.0 * rng.gen::<f64>()) * std::f64::consts::PI / 180.0;
@@ -269,6 +250,20 @@ fn spawn_slam_6dof(rng: &mut impl Rng) -> Spawn {
         0.10 * (rng.gen::<f64>() - 0.5),
     );
     s
+}
+
+/// 2 km / 6DOF start: real q from T+0. Down 90–180 m/s, some east (and north off-plane).
+fn slam_enu_vel(rng: &mut impl Rng, plane_lock: bool) -> Vec3 {
+    let vz = -(90.0 + 90.0 * rng.gen::<f64>());
+    let ve_s = if rng.gen::<bool>() { 1.0 } else { -1.0 };
+    let ve = (15.0 + 45.0 * rng.gen::<f64>()) * ve_s;
+    let vn = if plane_lock {
+        0.0
+    } else {
+        let vn_s = if rng.gen::<bool>() { 1.0 } else { -1.0 };
+        (8.0 + 22.0 * rng.gen::<f64>()) * vn_s
+    };
+    Vec3::new(ve, vn, vz)
 }
 
 fn spawn_glide(rng: &mut impl Rng) -> Spawn {
@@ -433,5 +428,26 @@ mod tests {
         assert!(bx.dot(up) > 0.95, "body X should be up");
         assert!(by.dot(north).abs() > 0.95, "body Y should be north");
         let _ = east;
+    }
+
+    #[test]
+    fn slam_spawn_is_hotter() {
+        let mut rng = SmallRng::seed_from_u64(3);
+        let s = Scenario::Slam.spawn(&mut rng);
+        let pad = crate::earth::pad_geodetic();
+        let (_, v_g) = crate::earth::eci_vel_to_ecef_ground(s.r_eci, s.v_eci, 0.0);
+        let (east, north, up) = crate::earth::enu_basis(pad.lat, pad.lon);
+        let v_up = v_g.dot(up);
+        let v_e = v_g.dot(east);
+        let v_n = v_g.dot(north);
+        assert!(
+            v_up < -85.0 && v_up > -185.0,
+            "2 km down speed {v_up}"
+        );
+        assert!(
+            v_e.abs() > 12.0 && v_e.abs() < 65.0,
+            "2 km east speed {v_e}"
+        );
+        assert!(v_n.abs() < 2.0, "2 km north speed {v_n}");
     }
 }

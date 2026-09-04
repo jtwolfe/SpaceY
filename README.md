@@ -40,7 +40,7 @@ If `CARGO_TARGET_DIR` is set, bindgen can pick a stale wasm. Unset it so bindgen
   - **RCS**: policy-owned cold-gas commands (Q-fade, no inner PD). Off during 2D pad/2 km (plane-lock); 6DOF and vacuum can use it. Autopilot demo still uses its own rate loop.
 - **Wind / weather**: Florida-east-coast caricature + OU gusts. Training samples **intensity and heading** every episode (stage-scaled). Pad stays nearly calm (≲0.25× the slider); real breeze starts at the Wind stage, and pad mixes two windier gens before promoting. Storm/shear HUD boxes **pin** that bit on; the wind slider is the nominal intensity (default **1×**). Wind is not an MLP input.
 - **Destruction** (default on): max-Q, over-G, q-alpha, AoA, spin, hard impact.
-- **Success**: ground contact, engine ≲12 m, ≲8 m/s, ≲4 m/s horizontal, within 20 m of the pad, ≲8° tilt, intact. Hovering in the volume is not a land. Fuel-out, hang, or breakup still in the air is scored like refusing to come down. On hops, tilt is charged at contact (not peak mid-burn) and a fast slap is worse than a slower sit-down; hanging still loses to touching the ground.
+- **Success**: ground contact, engine ≲12 m, ≲8 m/s, ≲4 m/s horizontal, within 20 m of the pad, ≲8° tilt, intact. Hovering in the volume is not a land. Fuel-out, hang, or breakup still in the air is scored like refusing to come down. On hops, tilt is charged at contact (not peak mid-burn) and a fast slap is worse than a slower sit-down; hanging still loses to touching the ground. Policy grid fins fade below ~4 kPa (pad) and a rail tax on commanded ±28° dies out as *q* rises so glide can still divert.
 
 ## How training works
 
@@ -57,7 +57,7 @@ Curriculum is internal. After three generations at ≥30% true lands, pad mixes 
 | Stage | Start | What the net must learn |
 |-------|--------|-------------------------|
 | 1 pad slam | ~250 m, falling ~15 m/s, light wind, pitch plane | Time one latched burn, touch the pad |
-| 2 2 km slam | ~2 km, 40–120 m/s down, ±200 m east | Ignition timing |
+| 2 2 km slam | ~2 km, 90–180 m/s down plus some east, ±200 m | Ignition timing; grids have real *q* |
 | 3 6DOF | Same energy, small tilt/rate | Both gimbals + roll fin |
 | 4 wind | 6DOF, unobserved sampled wind | Infer gusts from velocity drift |
 | 5 glide | ~20 km, ~380 m/s | Fins, then the same slam |

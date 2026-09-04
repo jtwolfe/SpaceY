@@ -19,8 +19,8 @@ use crate::policy::{
 use crate::constants::inertia_diag;
 use crate::scenario::Scenario;
 use crate::vehicle::{
-    aero, check_destruction_limits, propulsion, rcs_commanded, rcs_moment, DestroyReason,
-    EngineGate,
+    aero, check_destruction_limits, fin_q_enable, propulsion, rcs_commanded, rcs_moment,
+    DestroyReason, EngineGate,
 };
 use crate::wind::{Weather, Wind};
 use rand::rngs::StdRng;
@@ -75,6 +75,7 @@ pub struct Sim {
     pub last_thrust: f64,
     pub last_n_engines: u8,
     pub last_fins: [f64; 3],
+    pub last_fin_cmd: [f64; 3],
     pub last_fin_delta: [f64; 4],
     pub last_gimbal: [f64; 2],
     pub last_rcs: f64,
@@ -85,6 +86,8 @@ pub struct Sim {
     pub max_aoa: f64,
     pub max_tilt: f64,
     pub tumble_s: f64,
+    /// Peak of (mean |pre-fade fin|/max) × low-q weight. Pad rails, not glide divert.
+    pub max_fin_rail_w: f64,
     pub seed: u32,
     held_controls: Controls,
     last_policy_t: f64,
@@ -182,6 +185,7 @@ impl Sim {
             last_thrust: 0.0,
             last_n_engines: 0,
             last_fins: [0.0; 3],
+            last_fin_cmd: [0.0; 3],
             last_fin_delta: [0.0; 4],
             last_gimbal: [0.0; 2],
             last_rcs: 0.0,
@@ -192,6 +196,7 @@ impl Sim {
             max_aoa: 0.0,
             max_tilt: 0.0,
             tumble_s: 0.0,
+            max_fin_rail_w: 0.0,
             seed,
             held_controls: Controls::default(),
             last_policy_t: -1.0,
@@ -371,9 +376,29 @@ impl Sim {
         u.n_engines = n_eng;
         u.gimbal_y = slew_axis(self.last_gimbal[0], u.gimbal_y, GIMBAL_SLEW_RAD_S, dt);
         u.gimbal_z = slew_axis(self.last_gimbal[1], u.gimbal_z, GIMBAL_SLEW_RAD_S, dt);
-        u.fin_pitch = slew_axis(self.last_fins[0], u.fin_pitch, FIN_SLEW_RAD_S, dt);
-        u.fin_yaw = slew_axis(self.last_fins[1], u.fin_yaw, FIN_SLEW_RAD_S, dt);
-        u.fin_roll = slew_axis(self.last_fins[2], u.fin_roll, FIN_SLEW_RAD_S, dt);
+        let q_dyn = 0.5 * air.density * {
+            let v = v_rel_body.norm();
+            v * v
+        };
+        if self.pilot == Pilot::Policy {
+            u.fin_pitch = slew_axis(self.last_fin_cmd[0], u.fin_pitch, FIN_SLEW_RAD_S, dt);
+            u.fin_yaw = slew_axis(self.last_fin_cmd[1], u.fin_yaw, FIN_SLEW_RAD_S, dt);
+            u.fin_roll = slew_axis(self.last_fin_cmd[2], u.fin_roll, FIN_SLEW_RAD_S, dt);
+            self.last_fin_cmd = [u.fin_pitch, u.fin_yaw, u.fin_roll];
+            let rail = (u.fin_pitch.abs() + u.fin_yaw.abs() + u.fin_roll.abs())
+                / (3.0 * FIN_MAX_DEFLECT_RAD);
+            let w = FIN_RAIL_Q_PA / (FIN_RAIL_Q_PA + q_dyn.max(0.0));
+            self.max_fin_rail_w = self.max_fin_rail_w.max(rail * w);
+            let enable = fin_q_enable(q_dyn);
+            u.fin_pitch *= enable;
+            u.fin_yaw *= enable;
+            u.fin_roll *= enable;
+        } else {
+            u.fin_pitch = slew_axis(self.last_fins[0], u.fin_pitch, FIN_SLEW_RAD_S, dt);
+            u.fin_yaw = slew_axis(self.last_fins[1], u.fin_yaw, FIN_SLEW_RAD_S, dt);
+            u.fin_roll = slew_axis(self.last_fins[2], u.fin_roll, FIN_SLEW_RAD_S, dt);
+            self.last_fin_cmd = [u.fin_pitch, u.fin_yaw, u.fin_roll];
+        }
 
         let a = aero(v_rel_body, air, u.fin_pitch, u.fin_yaw, u.fin_roll);
         let burn = propulsion(
@@ -822,6 +847,8 @@ pub fn episode_fitness(sim: &Sim) -> f64 {
     {
         f -= 80.0 * (n.speed - SUCCESS_SPEED_MPS).max(0.0).min(70.0);
     }
+    // Pre-fade rail × low-q weight. Pad 28° pays; glide q makes this ~0.
+    f -= FIN_RAIL_TAX * sim.max_fin_rail_w;
     f - relight_penalty(sim)
 }
 
@@ -1087,6 +1114,63 @@ mod tests {
             "TVC cartwheel {} should lose to upright slap {}",
             gimb.0,
             fall.0
+        );
+    }
+
+    #[test]
+    fn pad_pegged_fins_lose_to_zero_fins() {
+        let b2 = throttle_out_bias(crate::policy::HIDDEN_START);
+        let fall = pad_rollout(7, |_| {});
+        let peg = pad_rollout(7, |w| w[b2 + 3] = 3.0);
+        assert!(
+            peg.0 < fall.0,
+            "pad rail {peg:?} should lose to zero fins {fall:?}"
+        );
+    }
+
+    #[test]
+    fn pad_policy_fins_fade_at_low_q() {
+        let b2 = throttle_out_bias(crate::policy::HIDDEN_START);
+        let mut sim = Sim::new_with(7, true, 0.0, Scenario::Pad, Weather::default());
+        sim.pilot = Pilot::Policy;
+        let h = crate::policy::HIDDEN_START;
+        let mut w = vec![0.0; crate::policy::n_weights(h)];
+        w[b2 + 3] = 3.0;
+        sim.set_weights(&w);
+        for _ in 0..40 {
+            if sim.terminated() {
+                break;
+            }
+            sim.step(sim.adaptive_dt());
+        }
+        assert!(
+            sim.last_aero_q < FIN_Q_FADE_PA,
+            "pad q {}",
+            sim.last_aero_q
+        );
+        assert!(
+            sim.last_fins[0].abs() < 1.0 * std::f64::consts::PI / 180.0,
+            "applied pitch {}",
+            sim.last_fins[0].to_degrees()
+        );
+        assert!(
+            sim.last_fin_cmd[0].abs() > 8.0 * std::f64::consts::PI / 180.0,
+            "cmd pitch {}",
+            sim.last_fin_cmd[0].to_degrees()
+        );
+    }
+
+    #[test]
+    fn glide_fin_rail_tax_does_not_beat_hang() {
+        let mut sit = ground_miss(hop_base());
+        sit.scenario = Scenario::Glide;
+        sit.max_fin_rail_w = 1.0;
+        let hang = airborne_at(hop_base(), TermReason::Timeout, 400.0, 6.0);
+        let slow = episode_fitness(&sit);
+        let up = episode_fitness(&hang);
+        assert!(
+            slow > up,
+            "glide sit-down with full rail tax {slow} should still beat hang {up}"
         );
     }
 

@@ -30,6 +30,17 @@ pub fn mix_fins(pitch: f64, yaw: f64, roll: f64) -> [f64; 4] {
     d
 }
 
+/// 0 below FIN_Q_FADE_PA, 1 at/above FIN_Q_FULL_PA. Pad q cannot move the stack.
+pub fn fin_q_enable(q: f64) -> f64 {
+    if q <= FIN_Q_FADE_PA {
+        0.0
+    } else if q >= FIN_Q_FULL_PA {
+        1.0
+    } else {
+        (q - FIN_Q_FADE_PA) / (FIN_Q_FULL_PA - FIN_Q_FADE_PA)
+    }
+}
+
 /// Mach-dependent axial drag of a tail-first booster (order-of-magnitude curve,
 /// not a CFD table). Transonic bump + hypersonic softening.
 pub fn cd0(mach: f64) -> f64 {
@@ -373,6 +384,14 @@ mod tests {
 
     fn v_at_aoa(speed: f64, aoa: f64) -> Vec3 {
         Vec3::new(-speed * cos(aoa), 0.0, speed * sin(aoa))
+    }
+
+    #[test]
+    fn fin_q_enable_is_off_on_the_pad() {
+        assert_eq!(fin_q_enable(0.0), 0.0);
+        assert_eq!(fin_q_enable(FIN_Q_FADE_PA), 0.0);
+        assert!((fin_q_enable(FIN_Q_FULL_PA) - 1.0).abs() < 1e-12);
+        assert!((fin_q_enable(0.5 * (FIN_Q_FADE_PA + FIN_Q_FULL_PA)) - 0.5).abs() < 1e-9);
     }
 
     #[test]

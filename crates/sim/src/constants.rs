@@ -60,6 +60,12 @@ pub const GIMBAL_MAX_RAD: f64 = 5.0 * std::f64::consts::PI / 180.0;
 /// Plant slew so a 10 Hz hold cannot teleport TVC / lattices.
 pub const GIMBAL_SLEW_RAD_S: f64 = 25.0 * std::f64::consts::PI / 180.0;
 pub const FIN_SLEW_RAD_S: f64 = 40.0 * std::f64::consts::PI / 180.0;
+/// Policy fins are dead below this q (pad). Full authority by FIN_Q_FULL_PA.
+pub const FIN_Q_FADE_PA: f64 = 4_000.0;
+pub const FIN_Q_FULL_PA: f64 = 8_000.0;
+/// Score weight on pre-fade |fin|/max × FIN_RAIL_Q_PA / (FIN_RAIL_Q_PA + q).
+pub const FIN_RAIL_TAX: f64 = 400.0;
+pub const FIN_RAIL_Q_PA: f64 = 4_000.0;
 /// Once lit, a Merlin cannot chatter off at the 10 Hz policy tick.
 pub const ENGINE_MIN_BURN_S: f64 = 2.5;
 /// Shutdown → restart delay. PWM-by-relight is not a throttle.
