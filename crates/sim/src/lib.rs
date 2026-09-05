@@ -1,4 +1,4 @@
-//! SpaceY: Falcon 9-class first-stage 6DOF physics + CMA-ES trainer.
+//! SpaceY: Falcon 9-class first-stage 6DOF physics + sep-CMA trainer.
 //!
 //! Compiled to `wasm32-unknown-unknown` for in-browser training. Native
 //! `cargo test` covers atmosphere, frames, and RTLS episode termination.

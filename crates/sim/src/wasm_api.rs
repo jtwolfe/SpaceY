@@ -3,7 +3,7 @@
 use crate::cmaes::Trainer;
 use crate::policy::n_weights;
 use crate::scenario::Scenario;
-use crate::sim::{Pilot, Sim};
+use crate::sim::{EpisodeOpts, Pilot, Sim};
 use crate::wind::{sample_weather_var, Weather};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -22,6 +22,8 @@ pub struct Engine {
     seed: u32,
     watch_best: bool,
     autopilot: bool,
+    destroy_auto: bool,
+    display_seq: u32,
 }
 
 #[wasm_bindgen]
@@ -29,7 +31,7 @@ impl Engine {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Engine {
         let seed = 7;
-        let destroy = true;
+        let destroy = false;
         let wind_scale = 1.0;
         let scenario = Scenario::Pad;
         let weather = Weather::default();
@@ -49,6 +51,8 @@ impl Engine {
             seed,
             watch_best: true,
             autopilot: false,
+            destroy_auto: false,
+            display_seq: 0,
         }
     }
 
@@ -91,15 +95,27 @@ impl Engine {
         }
     }
 
+    fn next_display_seed(&mut self) -> u32 {
+        self.display_seq = self.display_seq.wrapping_add(1);
+        self.seed
+            .wrapping_add(self.display_seq.wrapping_mul(0x9E3779B9))
+            .wrapping_add(self.trainer.generation.wrapping_mul(17))
+    }
+
     fn rebuild_display(&mut self, seed: u32) {
         let (wx, scale, hard_pad) = self.episode_weather(seed);
-        let mut sim = Sim::new_with_opts(
+        let scen = self.display_scenario();
+        let mut sim = Sim::new_episode(
             seed,
             self.destroy,
             scale,
-            self.display_scenario(),
+            scen,
             wx,
-            hard_pad,
+            EpisodeOpts {
+                hard_pad,
+                slam_divert: self.trainer.slam_divert() || scen != Scenario::Slam,
+                guide_until: 0.0,
+            },
         );
         sim.pilot = if self.autopilot {
             Pilot::Autopilot
@@ -193,15 +209,19 @@ impl Engine {
 
     /// Spend up to `budget_ms` evaluating CMA-ES candidates.
     /// Display is *not* rewound each generation — the swarm view owns that.
-    /// A new champion or a stage promote does restart the hero vehicle from T+0.
+    /// A stage promote restarts the hero; a new champion is picked up on the
+    /// next display episode so the hop is not looped every time CMA improves.
     pub fn train_for_ms(&mut self, budget_ms: f64) -> bool {
         let finished = self.trainer.tick(budget_ms.max(1.0));
+        if !self.destroy_auto && self.trainer.any_success() {
+            self.destroy_auto = true;
+            self.set_destruction(true);
+        }
         if self.trainer.take_promoted() {
             self.scenario = self.trainer.scenario;
             self.wind_scale = self.trainer.wind_scale;
-            self.rebuild_display(self.seed.wrapping_add(self.trainer.generation));
-        } else if self.trainer.took_new_best() && self.watch_best {
-            self.reset(self.seed.wrapping_add(self.trainer.generation));
+            let seed = self.next_display_seed();
+            self.rebuild_display(seed);
         }
         finished
     }
@@ -225,7 +245,8 @@ impl Engine {
     pub fn step_display(&mut self, dt: f64) {
         if self.display.terminated() {
             if self.trainer.running {
-                self.rebuild_display(self.seed.wrapping_add(self.trainer.episodes + 1));
+                let seed = self.next_display_seed();
+                self.rebuild_display(seed);
             } else {
                 return;
             }
@@ -292,6 +313,8 @@ impl Engine {
 
     /// Wipe the saved CMA brain and restart at pad slam.
     pub fn reset_brain(&mut self) {
+        self.destroy_auto = false;
+        self.set_destruction(false);
         self.trainer.reset_brain();
         self.scenario = self.trainer.scenario;
         self.rebuild_display(self.seed);

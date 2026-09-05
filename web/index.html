@@ -16,7 +16,7 @@
           <span class="mark">SY</span>
           <div>
             <div class="title">SPACEY</div>
-            <div class="sub" id="mission-sub">FALCON 9-CLASS · RTLS · CMA-NEUROES</div>
+            <div class="sub" id="mission-sub">FALCON 9-CLASS · RTLS · SEP-CMA · RAJS</div>
           </div>
         </div>
         <div class="status" id="mission-status">STANDBY</div>
@@ -38,7 +38,7 @@
         <div class="phase-dots" id="phase-dots" aria-label="training stages"></div>
         <canvas id="fit-spark" width="236" height="42"></canvas>
         <canvas id="fit-hist" width="236" height="56"></canvas>
-        <p class="nav-hint" id="train-legend">true land = ≤8 m/s on the pad · 8–20 m/s sit-down is a miss, not a RUD · 2D until 6DOF</p>
+        <p class="nav-hint" id="train-legend">true land = ≤8 m/s on the pad · H / Hmax is the guide horizon · destruction stays off until a Success</p>
         <h2>GUIDANCE</h2>
         <dl id="guid-hud"></dl>
       </aside>
@@ -57,7 +57,7 @@
             Autopilot demo
           </label>
           <label class="check">
-            <input type="checkbox" id="tog-destroy" checked />
+            <input type="checkbox" id="tog-destroy" />
             Destruction
           </label>
           <label class="check">

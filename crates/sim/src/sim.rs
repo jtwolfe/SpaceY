@@ -17,7 +17,7 @@ use crate::policy::{
     actions_from_mlp, hidden_from_len, mlp_forward, n_weights, observe, HIDDEN_START, POLICY_DT,
 };
 use crate::constants::inertia_diag;
-use crate::scenario::Scenario;
+use crate::scenario::{Scenario, SpawnCfg};
 use crate::vehicle::{
     aero, check_destruction_limits, fin_q_enable, propulsion, rcs_commanded, rcs_moment,
     DestroyReason, EngineGate,
@@ -27,9 +27,27 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 use serde::Serialize;
 
+/// Trainer/display spawn + RAJS knobs.
+#[derive(Clone, Copy, Debug)]
+pub struct EpisodeOpts {
+    pub hard_pad: bool,
+    pub slam_divert: bool,
+    pub guide_until: f64,
+}
+
+impl Default for EpisodeOpts {
+    fn default() -> Self {
+        Self {
+            hard_pad: false,
+            slam_divert: true,
+            guide_until: 0.0,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pilot {
-    /// Hand-written tracker. Demo only — not the training prior.
+    /// Hand-written tracker. HUD demo, and the RAJS teacher until `guide_until`.
     Autopilot,
     /// MLP owns throttle, gimbal, fins, cluster, and RCS. No inner PD.
     Policy,
@@ -97,6 +115,10 @@ pub struct Sim {
     pub shaping: f64,
     pub v_slam: f64,
     pub engine: EngineGate,
+    /// RAJS: autopilot until this sim time, then the MLP. 0 = net from T+0.
+    pub guide_until: f64,
+    /// East velocity at spawn (2 km both-sign promote).
+    pub spawn_ve: f64,
 }
 
 impl Sim {
@@ -117,13 +139,13 @@ impl Sim {
         scenario: Scenario,
         weather: Weather,
     ) -> Self {
-        Self::new_with_opts(
+        Self::new_episode(
             seed,
             destroy_enabled,
             wind_scale,
             scenario,
             weather,
-            false,
+            EpisodeOpts::default(),
         )
     }
 
@@ -135,10 +157,38 @@ impl Sim {
         weather: Weather,
         hard_pad: bool,
     ) -> Self {
+        Self::new_episode(
+            seed,
+            destroy_enabled,
+            wind_scale,
+            scenario,
+            weather,
+            EpisodeOpts {
+                hard_pad,
+                slam_divert: true,
+                guide_until: 0.0,
+            },
+        )
+    }
+
+    pub fn new_episode(
+        seed: u32,
+        destroy_enabled: bool,
+        wind_scale: f64,
+        scenario: Scenario,
+        weather: Weather,
+        opts: EpisodeOpts,
+    ) -> Self {
         // StdRng (ChaCha) is portable across wasm32 (32-bit) and native
         // x86_64. SmallRng is xoshiro256++ vs xoshiro128++.
         let mut rng = StdRng::seed_from_u64(seed as u64 + 17);
-        let spawn = scenario.spawn_var(&mut rng, hard_pad);
+        let spawn = scenario.spawn_cfg(
+            &mut rng,
+            SpawnCfg {
+                hard_pad: opts.hard_pad,
+                slam_divert: opts.slam_divert,
+            },
+        );
         let fuel = spawn.fuel;
         let mut s = Self {
             t: 0.0,
@@ -208,9 +258,12 @@ impl Sim {
             shaping: 0.0,
             v_slam: 0.0,
             engine: EngineGate::default(),
+            guide_until: opts.guide_until.max(0.0),
+            spawn_ve: 0.0,
         };
         s.refresh_nav();
         s.v_enu_prev = s.last_nav.v_enu;
+        s.spawn_ve = s.last_nav.v_enu.x;
         s.v_slam = slam_v_ref(s.last_nav.engine_alt, wet_mass(fuel));
         s.phase = classify_phase(
             &s.last_nav,
@@ -344,37 +397,40 @@ impl Sim {
         let body_y = q_e.rotate(self.q_body_to_eci.rotate(Vec3::Y));
         let body_z = q_e.rotate(self.q_body_to_eci.rotate(Vec3::Z));
 
-        let (mut u, desired_x) = match self.pilot {
-            Pilot::Autopilot => {
-                let (mut u, desired_x) =
-                    nominal_controls(&self.last_nav, self.phase, self.scenario);
-                let (gy, gz, fp, fy, fr) = attitude_command(
-                    body_x,
-                    body_y,
-                    body_z,
-                    self.omega_body,
-                    desired_x,
-                    self.phase,
-                    self.last_aero_q,
-                );
-                u.gimbal_y = gy;
-                u.gimbal_z = gz;
-                u.fin_pitch = fp;
-                u.fin_yaw = fy;
-                u.fin_roll = fr;
-                (u, desired_x)
+        let guided = self.pilot == Pilot::Autopilot || self.t + 1e-12 < self.guide_until;
+        let (mut u, desired_x) = if guided {
+            let (mut u, desired_x) = nominal_controls(
+                &self.last_nav,
+                self.phase,
+                self.scenario,
+                self.engine.on,
+                self.start_ecef,
+            );
+            let (gy, gz, fp, fy, fr) = attitude_command(
+                body_x,
+                body_y,
+                body_z,
+                self.omega_body,
+                desired_x,
+                self.phase,
+                self.last_aero_q,
+            );
+            u.gimbal_y = gy;
+            u.gimbal_z = gz;
+            u.fin_pitch = fp;
+            u.fin_yaw = fy;
+            u.fin_roll = fr;
+            (u, desired_x)
+        } else {
+            let need = self.last_policy_t < 0.0
+                || self.t - self.last_policy_t >= POLICY_DT - 1e-9;
+            if need {
+                let feat = observe(&self.last_nav, body_y, self.omega_body);
+                let y = mlp_forward(&self.weights, self.hidden, &feat);
+                self.held_controls = actions_from_mlp(&y, self.scenario.plane_lock());
+                self.last_policy_t = self.t;
             }
-            Pilot::Policy => {
-                let need = self.last_policy_t < 0.0
-                    || self.t - self.last_policy_t >= POLICY_DT - 1e-9;
-                if need {
-                    let feat = observe(&self.last_nav, body_y, self.omega_body);
-                    let y = mlp_forward(&self.weights, self.hidden, &feat);
-                    self.held_controls = actions_from_mlp(&y, self.scenario.plane_lock());
-                    self.last_policy_t = self.t;
-                }
-                (self.held_controls, body_x)
-            }
+            (self.held_controls, body_x)
         };
 
         let (thr, n_eng) = self.engine.apply(self.t, u.throttle, u.n_engines);
@@ -696,9 +752,12 @@ impl Sim {
             wind_scale: self.wind_scale,
             cd: self.last_cd,
             v_ground: v_g.to_array(),
-            pilot: match self.pilot {
-                Pilot::Autopilot => "autopilot",
-                Pilot::Policy => "policy",
+            pilot: if self.pilot == Pilot::Autopilot {
+                "autopilot"
+            } else if self.t + 1e-12 < self.guide_until {
+                "guide"
+            } else {
+                "policy"
             },
             v_slam: self.v_slam,
             slam_xyz: self.slam_curve_xyz(),
@@ -706,6 +765,7 @@ impl Sim {
             helicity_s: self.helicity_s,
             lights: self.engine.lights,
             relights: self.engine.relights,
+            guide_until: self.guide_until,
         }
     }
 }
@@ -770,6 +830,7 @@ pub struct Snapshot {
     pub helicity_s: f64,
     pub lights: u32,
     pub relights: u32,
+    pub guide_until: f64,
 }
 
 fn slew_axis(current: f64, target: f64, rate: f64, dt: f64) -> f64 {
@@ -824,7 +885,7 @@ pub fn episode_fitness(sim: &Sim) -> f64 {
     f -= 0.20 * n.engine_alt.min(400.0);
     f -= 12.0 * n.speed.min(80.0);
     f -= 50.0 * n.tilt.min(1.6);
-    f -= 4.0 * n.range_h.min(250.0);
+    f -= RANGE_H_WEIGHT * n.range_h.min(RANGE_H_CAP_M);
     f -= 20.0 * sim.max_rate.min(3.0);
     // Hops: tilt at contact. Peak tilt mid-burn made a 6DOF suicide burn
     // lose to a fins-straight dart. Glide/RTLS still pay peak (entry cartwheel).
@@ -880,7 +941,10 @@ pub fn episode_fitness(sim: &Sim) -> f64 {
         && sim.term != TermReason::Success
         && n.engine_alt < 0.4
     {
-        f -= 80.0 * (n.speed - SUCCESS_SPEED_MPS).max(0.0).min(70.0);
+        f -= HOP_SPEED_TAX
+            * (n.speed - SUCCESS_SPEED_MPS)
+                .max(0.0)
+                .min(HOP_SPEED_TAX_OVER_MPS);
     }
     // Pre-fade rail × low-q weight. Pad 28° pays; glide q makes this ~0.
     f -= FIN_RAIL_TAX * sim.max_fin_rail_w;
@@ -906,6 +970,8 @@ pub struct EpisodeTrace {
     pub lat: Vec<f32>,
     pub lon: Vec<f32>,
     pub nav: Nav,
+    pub spawn_ve: f64,
+    pub guide_until: f64,
 }
 
 fn push_path_sample(sim: &Sim, xyz: &mut Vec<f32>, lat: &mut Vec<f32>, lon: &mut Vec<f32>) {
@@ -966,7 +1032,7 @@ pub fn run_episode_with(
     scenario: Scenario,
     weather: Weather,
 ) -> (f64, TermReason, Nav) {
-    let tr = run_episode_traced(
+    let tr = run_episode_opts(
         weights,
         seed,
         destroy,
@@ -974,7 +1040,7 @@ pub fn run_episode_with(
         scenario,
         weather,
         false,
-        false,
+        EpisodeOpts::default(),
     );
     (tr.fitness, tr.term, tr.nav)
 }
@@ -990,7 +1056,33 @@ pub fn run_episode_traced(
     soft_corridor: bool,
     hard_pad: bool,
 ) -> EpisodeTrace {
-    let mut sim = Sim::new_with_opts(seed, destroy, wind_scale, scenario, weather, hard_pad);
+    run_episode_opts(
+        weights,
+        seed,
+        destroy,
+        wind_scale,
+        scenario,
+        weather,
+        soft_corridor,
+        EpisodeOpts {
+            hard_pad,
+            slam_divert: true,
+            guide_until: 0.0,
+        },
+    )
+}
+
+pub fn run_episode_opts(
+    weights: &[f64],
+    seed: u32,
+    destroy: bool,
+    wind_scale: f64,
+    scenario: Scenario,
+    weather: Weather,
+    soft_corridor: bool,
+    opts: EpisodeOpts,
+) -> EpisodeTrace {
+    let mut sim = Sim::new_episode(seed, destroy, wind_scale, scenario, weather, opts);
     sim.set_weights(weights);
     sim.pilot = Pilot::Policy;
     sim.soft_corridor = soft_corridor;
@@ -1026,6 +1118,8 @@ pub fn run_episode_traced(
         lat,
         lon,
         nav: sim.last_nav,
+        spawn_ve: sim.spawn_ve,
+        guide_until: sim.guide_until,
     }
 }
 
@@ -1539,6 +1633,89 @@ mod tests {
     }
 
     #[test]
+    fn hop_hot_pipe_loses_to_slower_on_pad() {
+        let mut slow = ground_miss(hop_base());
+        slow.last_nav.speed = 20.0;
+        slow.last_nav.v_enu = Vec3::new(0.0, 0.0, -20.0);
+        slow.last_nav.range_h = 0.0;
+        let mut hot = ground_miss(hop_base());
+        hot.last_nav.speed = 180.0;
+        hot.last_nav.v_enu = Vec3::new(0.0, 0.0, -180.0);
+        hot.last_nav.range_h = 0.0;
+        let a = episode_fitness(&slow);
+        let b = episode_fitness(&hot);
+        assert!(a > b + 200.0, "20 m/s on-pad {a} should beat 180 m/s {b}");
+    }
+
+    #[test]
+    fn hop_range_beats_a_slightly_slower_offset() {
+        let mut pipe = ground_miss(hop_base());
+        pipe.last_nav.speed = 90.0;
+        pipe.last_nav.v_enu = Vec3::new(0.0, 0.0, -90.0);
+        pipe.last_nav.range_h = 5.0;
+        let mut ring = ground_miss(hop_base());
+        ring.last_nav.speed = 40.0;
+        ring.last_nav.v_enu = Vec3::new(0.0, 0.0, -40.0);
+        ring.last_nav.range_h = 200.0;
+        let on = episode_fitness(&pipe);
+        let off = episode_fitness(&ring);
+        assert!(
+            on > off,
+            "on-pad 90 m/s {on} should beat 200 m offset at 40 m/s {off}"
+        );
+    }
+
+    #[test]
+    fn rajs_guide_horizon_uses_autopilot_then_policy() {
+        let w = vec![0.0; crate::policy::n_weights(crate::policy::HIDDEN_START)];
+        let opts_on = EpisodeOpts {
+            hard_pad: false,
+            slam_divert: true,
+            guide_until: 12.0,
+        };
+        let mut guided = Sim::new_episode(
+            7,
+            false,
+            0.0,
+            Scenario::Pad,
+            Weather::default(),
+            opts_on,
+        );
+        guided.pilot = Pilot::Policy;
+        guided.set_weights(&w);
+        let mut dark = Sim::new_episode(
+            7,
+            false,
+            0.0,
+            Scenario::Pad,
+            Weather::default(),
+            EpisodeOpts {
+                guide_until: 0.0,
+                ..opts_on
+            },
+        );
+        dark.pilot = Pilot::Policy;
+        dark.set_weights(&w);
+        while guided.t < 10.0 && !guided.terminated() {
+            guided.step(guided.adaptive_dt());
+            if !dark.terminated() {
+                dark.step(dark.adaptive_dt());
+            }
+        }
+        assert!(
+            guided.engine.lights >= 1,
+            "RAJS guide should light a Merlin before H (t={}, lights={})",
+            guided.t,
+            guided.engine.lights
+        );
+        assert_eq!(
+            dark.engine.lights, 0,
+            "zero net without a guide horizon stays dark"
+        );
+        assert!(guided.t + 1e-9 >= 4.0);
+    }
+
+    #[test]
     fn dart_beats_hang_timeout() {
         let hang = airborne_at(hop_base(), TermReason::Timeout, 400.0, 6.0);
         let dart = ground_slap(hop_base());
@@ -1606,7 +1783,7 @@ mod tests {
     }
 
     #[test]
-    fn pad_autopilot_reaches_the_pad_theater() {
+    fn pad_autopilot_lands_in_the_box() {
         let mut sim = Sim::new_with(2, true, 0.0, Scenario::Pad, Weather::default());
         sim.pilot = Pilot::Autopilot;
         let mut guard = 0;
@@ -1614,12 +1791,85 @@ mod tests {
             sim.step(sim.adaptive_dt());
             guard += 1;
         }
+        let vh = sim.last_nav.v_enu.x.hypot(sim.last_nav.v_enu.y);
+        assert_eq!(
+            sim.term,
+            TermReason::Success,
+            "pad autopilot term {:?} dest={} alt={:.1} spd={:.1} vh={:.1} tilt={:.1}° range={:.1} fuel={:.0}",
+            sim.term,
+            sim.destroy_reason.as_str(),
+            sim.last_nav.engine_alt,
+            sim.last_nav.speed,
+            vh,
+            sim.last_nav.tilt.to_degrees(),
+            sim.last_nav.range_h,
+            sim.fuel,
+        );
+        assert!(sim.last_nav.engine_alt < SUCCESS_ENGINE_ALT_M);
+        assert!(sim.last_nav.range_h < SUCCESS_PAD_OFFSET_M);
+        assert!(sim.last_nav.speed < SUCCESS_SPEED_MPS);
+    }
+
+    #[test]
+    fn slam_autopilot_reaches_pad_theater() {
+        let mut sim = Sim::new_with(5, false, 0.0, Scenario::Slam, Weather::default());
+        sim.pilot = Pilot::Autopilot;
+        let mut guard = 0;
+        while !sim.terminated() && guard < 40_000 {
+            sim.step(sim.adaptive_dt());
+            guard += 1;
+        }
         assert!(sim.terminated());
-        assert!(sim.last_nav.engine_alt < 150.0);
+        assert_ne!(sim.term, TermReason::Corridor);
+        assert_ne!(sim.term, TermReason::FuelInfeasible);
         assert!(
-            sim.last_nav.range_h < 2_000.0,
-            "hovered away from pad: range {}",
-            sim.last_nav.range_h
+            sim.last_nav.engine_alt < 400.0 || sim.min_range_gc < 2_000.0,
+            "2 km guide should get near the pad: alt {} range {} term {:?}",
+            sim.last_nav.engine_alt,
+            sim.min_range_gc,
+            sim.term
+        );
+    }
+
+    #[test]
+    fn rtls_autopilot_reaches_glide_theater() {
+        let mut sim = Sim::new_with(3, true, 0.4, Scenario::Rtls, Weather::default());
+        sim.pilot = Pilot::Autopilot;
+        sim.soft_corridor = true;
+        let mut saw_glide = false;
+        let mut guard = 0;
+        while !sim.terminated() && guard < 80_000 {
+            sim.step(sim.adaptive_dt());
+            if sim.last_nav.alt < 25_000.0 {
+                saw_glide = true;
+                break;
+            }
+            if matches!(
+                sim.term,
+                TermReason::Destroyed | TermReason::FuelInfeasible
+            ) {
+                break;
+            }
+            guard += 1;
+        }
+        assert_ne!(
+            sim.term,
+            TermReason::Destroyed,
+            "destroyed {} alt={} range={}",
+            sim.destroy_reason.as_str(),
+            sim.last_nav.alt,
+            sim.last_nav.range_gc
+        );
+        assert_ne!(sim.term, TermReason::FuelInfeasible);
+        assert!(
+            saw_glide,
+            "glide theater miss term={:?} dest={} alt={} range={} off={} soft={}",
+            sim.term,
+            sim.destroy_reason.as_str(),
+            sim.last_nav.alt,
+            sim.last_nav.range_gc,
+            sim.max_corridor_offset,
+            sim.soft_corridor,
         );
     }
 

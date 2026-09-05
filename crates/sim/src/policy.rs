@@ -12,7 +12,15 @@ use crate::math::{asinh, clamp, saturate, tanh, Quat, Vec3};
 pub const N_IN: usize = 14;
 pub const N_OUT: usize = 10;
 pub const HIDDEN_START: usize = 8;
-pub const HIDDEN_MAX: usize = 24;
+/// Frozen. Panic-growth to 24 is what spent the 5/6 glide net.
+pub const HIDDEN_MAX: usize = HIDDEN_START;
+/// tanh deadband before fins move (same idea as throttle).
+pub const FIN_DEADBAND: f64 = 0.08;
+/// |tanh|=1 maps to this fraction of ±28° so the rail is not the default.
+pub const FIN_CMD_SCALE: f64 = 0.92;
+/// Outputs zeroed by plane-lock and frozen in CMA on pad/2 km: gimbal_z,
+/// fin yaw/roll, RCS xyz.
+pub const PLANE_LOCK_OUTPUTS: [usize; 6] = [2, 4, 5, 7, 8, 9];
 /// Policy tick. Physics may run faster; the last action is held.
 pub const POLICY_DT: f64 = 0.10;
 /// asinh characteristic length — one scale for every curriculum stage.
@@ -64,46 +72,49 @@ pub fn mlp_forward(w: &[f64], hidden: usize, x: &[f64; N_IN]) -> [f64; N_OUT] {
     y
 }
 
-/// New hidden unit starts at 0 so the old mapping is unchanged (CMA-TWEANN).
-pub fn expand_hidden(w: &[f64], h_old: usize) -> Vec<f64> {
-    let h_new = (h_old + 1).min(HIDDEN_MAX);
-    if h_new == h_old {
-        return w.to_vec();
-    }
-    let mut out = vec![0.0; n_weights(h_new)];
-    for j in 0..h_old {
-        let src = j * N_IN;
-        let dst = j * N_IN;
-        if src + N_IN <= w.len() {
-            out[dst..dst + N_IN].copy_from_slice(&w[src..src + N_IN]);
-        }
-    }
-    let b1_old = h_old * N_IN;
-    let b1_new = h_new * N_IN;
-    for j in 0..h_old {
-        if b1_old + j < w.len() {
-            out[b1_new + j] = w[b1_old + j];
-        }
-    }
-    let w2_old = b1_old + h_old;
-    let w2_new = b1_new + h_new;
-    for a in 0..N_OUT {
-        let src = w2_old + a * h_old;
-        let dst = w2_new + a * h_new;
-        for j in 0..h_old {
-            if src + j < w.len() {
-                out[dst + j] = w[src + j];
+pub fn w2_start(hidden: usize) -> usize {
+    hidden * N_IN + hidden
+}
+
+pub fn b2_start(hidden: usize) -> usize {
+    w2_start(hidden) + N_OUT * hidden
+}
+
+/// True at indices that must stay 0 while pad/2 km plane-lock is on.
+pub fn plane_lock_weight_mask(hidden: usize) -> Vec<bool> {
+    let n = n_weights(hidden);
+    let mut m = vec![false; n];
+    let w2 = w2_start(hidden);
+    let b2 = b2_start(hidden);
+    for &a in &PLANE_LOCK_OUTPUTS {
+        for j in 0..hidden {
+            let i = w2 + a * hidden + j;
+            if i < n {
+                m[i] = true;
             }
         }
-    }
-    let b2_old = w2_old + N_OUT * h_old;
-    let b2_new = w2_new + N_OUT * h_new;
-    for a in 0..N_OUT {
-        if b2_old + a < w.len() {
-            out[b2_new + a] = w[b2_old + a];
+        if b2 + a < n {
+            m[b2 + a] = true;
         }
     }
-    out
+    m
+}
+
+pub fn apply_plane_lock_mask(w: &mut [f64], hidden: usize) {
+    let mask = plane_lock_weight_mask(hidden);
+    for (i, freeze) in mask.iter().enumerate() {
+        if *freeze && i < w.len() {
+            w[i] = 0.0;
+        }
+    }
+}
+
+fn fin_from_tanh(y: f64) -> f64 {
+    if y.abs() <= FIN_DEADBAND {
+        return 0.0;
+    }
+    let mag = (y.abs() - FIN_DEADBAND) / (1.0 - FIN_DEADBAND);
+    y.signum() * mag * FIN_CMD_SCALE * FIN_MAX_DEFLECT_RAD
 }
 
 /// Pad-ENU engine position, velocity, body→ENU quaternion, body rate, and
@@ -169,9 +180,9 @@ pub fn actions_from_mlp(y: &[f64; N_OUT], plane_lock: bool) -> Controls {
     }
     u.gimbal_y = clamp(y[1] * GIMBAL_MAX_RAD, -GIMBAL_MAX_RAD, GIMBAL_MAX_RAD);
     u.gimbal_z = clamp(y[2] * GIMBAL_MAX_RAD, -GIMBAL_MAX_RAD, GIMBAL_MAX_RAD);
-    u.fin_pitch = clamp(y[3] * FIN_MAX_DEFLECT_RAD, -FIN_MAX_DEFLECT_RAD, FIN_MAX_DEFLECT_RAD);
-    u.fin_yaw = clamp(y[4] * FIN_MAX_DEFLECT_RAD, -FIN_MAX_DEFLECT_RAD, FIN_MAX_DEFLECT_RAD);
-    u.fin_roll = clamp(y[5] * FIN_MAX_DEFLECT_RAD, -FIN_MAX_DEFLECT_RAD, FIN_MAX_DEFLECT_RAD);
+    u.fin_pitch = clamp(fin_from_tanh(y[3]), -FIN_MAX_DEFLECT_RAD, FIN_MAX_DEFLECT_RAD);
+    u.fin_yaw = clamp(fin_from_tanh(y[4]), -FIN_MAX_DEFLECT_RAD, FIN_MAX_DEFLECT_RAD);
+    u.fin_roll = clamp(fin_from_tanh(y[5]), -FIN_MAX_DEFLECT_RAD, FIN_MAX_DEFLECT_RAD);
     u.rcs_x = clamp(y[7], -1.0, 1.0);
     u.rcs_y = clamp(y[8], -1.0, 1.0);
     u.rcs_z = clamp(y[9], -1.0, 1.0);
@@ -199,7 +210,7 @@ mod tests {
         assert_eq!(n_weights(8), 8 * 14 + 8 + 10 * 8 + 10);
         assert_eq!(n_weights(8), 210);
         assert_eq!(hidden_from_len(210), 8);
-        assert_eq!(hidden_from_len(n_weights(16)), 16);
+        assert_eq!(n_weights(HIDDEN_MAX), 210);
     }
 
     #[test]
@@ -316,24 +327,25 @@ mod tests {
     }
 
     #[test]
-    fn expand_preserves_forward() {
-        let mut w = vec![0.0; n_weights(8)];
-        w[0] = 0.4;
-        w[n_weights(8) - 1] = -0.2;
-        let x = [
-            0.1, -0.2, 0.3, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.4, 0.0, 0.5,
-        ];
-        let y0 = mlp_forward(&w, 8, &x);
-        let w2 = expand_hidden(&w, 8);
-        assert_eq!(w2.len(), n_weights(9));
-        let y1 = mlp_forward(&w2, 9, &x);
-        for i in 0..N_OUT {
-            assert!(
-                (y0[i] - y1[i]).abs() < 1e-12,
-                "out {i}: {} vs {}",
-                y0[i],
-                y1[i]
-            );
-        }
+    fn fin_deadband_holds_zero() {
+        let mut y = [0.0; N_OUT];
+        y[3] = 0.05;
+        y[4] = -0.05;
+        let u = actions_from_mlp(&y, false);
+        assert_eq!(u.fin_pitch, 0.0);
+        assert_eq!(u.fin_yaw, 0.0);
+    }
+
+    #[test]
+    fn plane_lock_mask_covers_locked_outputs() {
+        let m = plane_lock_weight_mask(8);
+        assert_eq!(m.iter().filter(|b| **b).count(), 6 * (8 + 1));
+        let mut w = vec![1.0; n_weights(8)];
+        apply_plane_lock_mask(&mut w, 8);
+        let y = mlp_forward(&w, 8, &[0.2; N_IN]);
+        assert!(y[2].abs() < 1e-12);
+        assert!(y[4].abs() < 1e-12);
+        assert!(y[5].abs() < 1e-12);
+        assert!(y[7].abs() < 1e-12);
     }
 }

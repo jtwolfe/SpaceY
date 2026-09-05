@@ -17,15 +17,16 @@ pub struct Aero {
 }
 
 /// X-config mixer: four lattices at 45/135/225/315°.
+/// Divert (pitch/yaw) first; roll only in leftover headroom so commanding
+/// all three at 28° cannot saturate every lattice.
 pub fn mix_fins(pitch: f64, yaw: f64, roll: f64) -> [f64; 4] {
     let mut d = [0.0; 4];
+    let max = FIN_MAX_DEFLECT_RAD;
     for i in 0..4 {
         let th = std::f64::consts::FRAC_PI_4 + i as f64 * std::f64::consts::FRAC_PI_2;
-        d[i] = clamp(
-            pitch * cos(th) + yaw * sin(th) + roll,
-            -FIN_MAX_DEFLECT_RAD,
-            FIN_MAX_DEFLECT_RAD,
-        );
+        let divert = clamp(pitch * cos(th) + yaw * sin(th), -max, max);
+        let head = max - divert.abs();
+        d[i] = divert + clamp(roll, -head, head);
     }
     d
 }
@@ -471,6 +472,26 @@ mod tests {
             assert!((p[i] + n[i]).abs() < 1e-12);
         }
         assert!(p.iter().any(|d| d.abs() > 0.05));
+    }
+
+    #[test]
+    fn mixer_keeps_divert_when_roll_is_railed() {
+        let max = FIN_MAX_DEFLECT_RAD;
+        let d = mix_fins(max, 0.0, max);
+        let divert_only = mix_fins(max, 0.0, 0.0);
+        for i in 0..4 {
+            assert!(d[i].abs() <= max + 1e-12);
+            if divert_only[i].abs() > 0.05 {
+                assert!(
+                    d[i] * divert_only[i] >= -1e-12,
+                    "roll must not reverse divert: {d:?} vs {divert_only:?}"
+                );
+            }
+        }
+        assert!(
+            d.iter().any(|x| (x.abs() - max).abs() > 1e-6),
+            "railed pitch+roll must not saturate every lattice: {d:?}"
+        );
     }
 
     #[test]

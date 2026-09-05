@@ -14,7 +14,7 @@ type WasmEngine = Engine & {
   reset_latest_phase?: () => void;
 };
 
-const BRAIN_KEY = "spacey-brain-v3";
+const BRAIN_KEY = "spacey-brain-v4";
 
 function persistBrain(engine: WasmEngine) {
   try {
@@ -107,6 +107,20 @@ function landBoxNote(s: Snapshot): string {
 
 function camForStage(stageN: number): CamMode {
   return stageN >= 5 ? "orbit" : "pad";
+}
+
+function rajsNote(t: TrainInfo, s: Snapshot): string {
+  const h = s.guide_until ?? 0;
+  const hMax = t.h_max ?? 0;
+  const bits = [`H ${fmt(h, 0)} / ${fmt(hMax, 0)} s`];
+  if ((t.h_frac ?? 1) > 0.35) bits.push("guide owns");
+  if (t.stage === "slam" && t.slam_divert === false) bits.push("energy");
+  return bits.join(" · ");
+}
+
+function netNote(t: TrainInfo): string {
+  const r = t.restarts ? ` · r${t.restarts}` : "";
+  return `${t.hidden ?? 8} hid · ${t.n_weights ?? "—"} w${r}`;
 }
 
 function paintPhaseDots(el: HTMLElement, t: TrainInfo) {
@@ -270,7 +284,8 @@ async function main() {
       ["Mission", "RTLS"],
       ["Train", `${stageN}/${stageCount} ${stageLabel}`],
       ["Phase", s.phase],
-      ["Pilot", s.pilot === "autopilot" ? "autopilot" : "policy"],
+      ["Pilot", s.pilot === "autopilot" ? "autopilot" : s.pilot === "guide" ? "guide" : "policy"],
+      ["RAJS", rajsNote(t, s)],
       ["Obs", s.plane_lock ? "2D pad-ENU" : "6DOF pad-ENU"],
       ["v* slam", `${fmt(s.v_slam ?? 0, 1)} m/s`],
       ["Range", `${fmt(s.range_h / 1000, 2)} km`],
@@ -281,9 +296,13 @@ async function main() {
       ["Breakup", s.destroy_reason || "—", s.destroy_reason ? "bad" : undefined],
       ["Best fit", fmt(t.best_ever, 0)],
       ["σ", fmt(t.sigma, 3)],
-      ["Net", `${t.hidden ?? 8} hid · ${t.n_weights ?? "—"} w${t.growths ? ` · +${t.growths}` : ""}`],
+      ["Net", netNote(t)],
     ];
     row(guid, guidRows);
+    const destBox = document.querySelector<HTMLInputElement>("#tog-destroy");
+    if (destBox && destBox.checked !== !!s.destroy_enabled) {
+      destBox.checked = !!s.destroy_enabled;
+    }
 
     const pop = t.population || 128;
     const landPct = Math.round((t.land_rate ?? 0) * 100);
@@ -348,6 +367,8 @@ async function main() {
     scene?.resetTrail();
     lastStageN = 0;
     setCamUi("pad");
+    const destBox = document.querySelector<HTMLInputElement>("#tog-destroy");
+    if (destBox) destBox.checked = false;
   });
   document.querySelector("#btn-reset-phase")!.addEventListener("click", () => {
     engine.reset_latest_phase?.();

@@ -129,12 +129,38 @@ impl Scenario {
 
     /// `hard_pad` lowers the pad start and is ignored on later stages.
     pub fn spawn_var(self, rng: &mut impl Rng, hard_pad: bool) -> Spawn {
+        self.spawn_cfg(
+            rng,
+            SpawnCfg {
+                hard_pad,
+                slam_divert: true,
+            },
+        )
+    }
+
+    pub fn spawn_cfg(self, rng: &mut impl Rng, cfg: SpawnCfg) -> Spawn {
         match self {
-            Scenario::Pad => spawn_pad(rng, hard_pad),
-            Scenario::Slam => spawn_slam_2d(rng),
+            Scenario::Pad => spawn_pad(rng, cfg.hard_pad),
+            Scenario::Slam => spawn_slam_2d(rng, cfg.slam_divert),
             Scenario::Attitude | Scenario::Wind => spawn_slam_6dof(rng),
             Scenario::Glide => spawn_glide(rng),
             Scenario::Rtls => spawn_rtls(rng),
+        }
+    }
+}
+
+/// Extra spawn knobs for the trainer (pad mix + 2 km energy-then-divert).
+#[derive(Clone, Copy, Debug)]
+pub struct SpawnCfg {
+    pub hard_pad: bool,
+    pub slam_divert: bool,
+}
+
+impl Default for SpawnCfg {
+    fn default() -> Self {
+        Self {
+            hard_pad: false,
+            slam_divert: true,
         }
     }
 }
@@ -225,16 +251,20 @@ fn spawn_pad(rng: &mut impl Rng, hard: bool) -> Spawn {
     spawn_upright(rng, alt, Vec3::new(vx, 0.0, vz), e, 0.0, HOVER_FUEL_KG, true)
 }
 
-fn spawn_slam_2d(rng: &mut impl Rng) -> Spawn {
+fn spawn_slam_2d(rng: &mut impl Rng, divert: bool) -> Spawn {
     let alt = 2_050.0 + 80.0 * (rng.gen::<f64>() - 0.5);
-    let v = slam_enu_vel(rng, true);
-    let e = 200.0 * (rng.gen::<f64>() - 0.5);
+    let v = slam_enu_vel(rng, true, divert);
+    let e = if divert {
+        200.0 * (rng.gen::<f64>() - 0.5)
+    } else {
+        40.0 * (rng.gen::<f64>() - 0.5)
+    };
     spawn_upright(rng, alt, v, e, 0.0, SUICIDE_FUEL_KG, true)
 }
 
 fn spawn_slam_6dof(rng: &mut impl Rng) -> Spawn {
     let alt = 2_050.0 + 80.0 * (rng.gen::<f64>() - 0.5);
-    let v = slam_enu_vel(rng, false);
+    let v = slam_enu_vel(rng, false, true);
     let e = 200.0 * (rng.gen::<f64>() - 0.5);
     let n = 200.0 * (rng.gen::<f64>() - 0.5);
     let mut s = spawn_upright(rng, alt, v, e, n, SUICIDE_FUEL_KG, false);
@@ -253,10 +283,15 @@ fn spawn_slam_6dof(rng: &mut impl Rng) -> Spawn {
 }
 
 /// 2 km / 6DOF start: real q from T+0. Down 90–180 m/s, some east (and north off-plane).
-fn slam_enu_vel(rng: &mut impl Rng, plane_lock: bool) -> Vec3 {
+/// `divert == false` keeps east tiny so CMA can learn the burn before the coin-flip.
+fn slam_enu_vel(rng: &mut impl Rng, plane_lock: bool, divert: bool) -> Vec3 {
     let vz = -(90.0 + 90.0 * rng.gen::<f64>());
     let ve_s = if rng.gen::<bool>() { 1.0 } else { -1.0 };
-    let ve = (15.0 + 45.0 * rng.gen::<f64>()) * ve_s;
+    let ve = if divert {
+        (15.0 + 45.0 * rng.gen::<f64>()) * ve_s
+    } else {
+        3.0 * (rng.gen::<f64>() - 0.5)
+    };
     let vn = if plane_lock {
         0.0
     } else {
@@ -449,5 +484,24 @@ mod tests {
             "2 km east speed {v_e}"
         );
         assert!(v_n.abs() < 2.0, "2 km north speed {v_n}");
+    }
+
+    #[test]
+    fn slam_energy_first_keeps_east_small() {
+        let mut rng = SmallRng::seed_from_u64(3);
+        let s = Scenario::Slam.spawn_cfg(
+            &mut rng,
+            SpawnCfg {
+                hard_pad: false,
+                slam_divert: false,
+            },
+        );
+        let pad = crate::earth::pad_geodetic();
+        let (_, v_g) = crate::earth::eci_vel_to_ecef_ground(s.r_eci, s.v_eci, 0.0);
+        let (east, _, up) = crate::earth::enu_basis(pad.lat, pad.lon);
+        let v_e = v_g.dot(east);
+        let v_up = v_g.dot(up);
+        assert!(v_e.abs() < 4.0, "energy-first east {v_e}");
+        assert!(v_up < -85.0 && v_up > -185.0, "energy-first down {v_up}");
     }
 }

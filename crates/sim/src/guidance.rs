@@ -1,4 +1,4 @@
-//! Nominal RTLS tracker (autopilot demo), corridor, and fuel bound.
+//! Nominal RTLS tracker (RAJS teacher + HUD autopilot demo), corridor, and fuel bound.
 
 use crate::constants::*;
 use crate::earth::{ecef_to_enu, enu_basis, pad_ecef, pad_geodetic};
@@ -137,6 +137,9 @@ pub fn should_start_landing_for(nav: &Nav, scenario: Scenario) -> bool {
         return true;
     }
     let range = nav.range_h;
+    if nav.range_h > 8_000.0 {
+        return false;
+    }
     if nav.alt > 12_000.0 && range > 4_000.0 {
         return false;
     }
@@ -163,7 +166,13 @@ pub fn v_ref(alt: f64) -> f64 {
     }
 }
 
-pub fn nominal_controls(nav: &Nav, phase: Phase, _scenario: Scenario) -> (Controls, Vec3) {
+pub fn nominal_controls(
+    nav: &Nav,
+    phase: Phase,
+    _scenario: Scenario,
+    engine_on: bool,
+    start_ecef: Vec3,
+) -> (Controls, Vec3) {
     // Desired body +X (interstage / "up" of the stage).
     let mut desired_x = nav.up;
     let mut u = Controls::default();
@@ -180,7 +189,7 @@ pub fn nominal_controls(nav: &Nav, phase: Phase, _scenario: Scenario) -> (Contro
                 pred + nav.range_h
             };
             if nav.v_enu.norm() > 10.0 {
-                desired_x = -enu_to_approx(nav.v_enu.normalized(), nav);
+                desired_x = aim_retro_to_pad(nav, start_ecef);
             }
             if phase == Phase::Entry {
                 let q_hot = nav.q > 28_000.0 && nav.speed > 480.0;
@@ -217,11 +226,11 @@ pub fn nominal_controls(nav: &Nav, phase: Phase, _scenario: Scenario) -> (Contro
                 Vec3::new(-nav.pos_enu.x / range, -nav.pos_enu.y / range, -0.4).normalized()
             };
             let aim = Vec3::new(vdir.x, vdir.y, (vdir.z + dive).clamp(-0.98, -0.12)).normalized();
-            desired_x = -enu_to_approx(aim, nav);
+            desired_x = aim_retro_to_pad_dir(nav, -aim, start_ecef);
             u.n_engines = 0;
         }
         Phase::Landing => {
-            rtls_hover_slam(nav, &mut u, &mut desired_x);
+            rtls_hover_slam(nav, &mut u, &mut desired_x, engine_on);
         }
     }
 
@@ -236,29 +245,54 @@ fn predicted_glide_range(nav: &Nav) -> f64 {
     predicted_landing_range(nav)
 }
 
-/// Hover-slam: track v_des(h) = −√(2 a h). Do NOT PD on kilometres
-/// of altitude — that commanded throttle=0 from 4 km (debug_ep).
-fn rtls_hover_slam(nav: &Nav, u: &mut Controls, desired_x: &mut Vec3) {
+/// Suicide burn: Merlin min throttle is above hover, so a 10 Hz on/off
+/// loop hits the 6 s restart delay and slaps the pad. Wait until stopping
+/// distance meets altitude, then one latched burn into the box.
+fn rtls_hover_slam(nav: &Nav, u: &mut Controls, desired_x: &mut Vec3, engine_on: bool) {
     let pz = nav.engine_alt.max(0.5);
     let vz = nav.v_enu.z;
-    let a_land = 8.0;
-    let v_des = -(sqrt(2.0 * a_land * (pz - 4.0).max(0.0))).min(120.0);
-    let az_cmd = 2.2 * (v_des - vz) + G0 + if pz < 40.0 { 0.4 * (6.0 - pz) } else { 0.0 };
-    let t_max = MERLIN_THRUST_SL_N * N_ENGINES_LANDING as f64;
-    u.n_engines = N_ENGINES_LANDING;
-    if -vz > 80.0 || az_cmd * nav.mass > t_max * 0.90 {
-        u.n_engines = N_ENGINES_ENTRY;
-    }
-    let t_avail = MERLIN_THRUST_SL_N * u.n_engines as f64;
-    u.throttle = saturate(az_cmd.max(0.0) * nav.mass / t_avail.max(1.0));
+    let v_down = (-vz).max(0.05);
+    let v_land = 5.5;
+    let h_land = 5.0;
+    let a1 = (MERLIN_THRUST_SL_N / nav.mass - G0).clamp(4.0, 40.0);
+    let a3 = (MERLIN_THRUST_SL_N * N_ENGINES_ENTRY as f64 / nav.mass - G0).clamp(8.0, 90.0);
+    let s1 = (v_down * v_down - v_land * v_land).max(0.0) / (2.0 * a1) + h_land;
+    let s3 = (v_down * v_down - v_land * v_land).max(0.0) / (2.0 * a3) + h_land;
+    let need3 = pz > 400.0 && (pz + 8.0 < s1 || (v_down > 70.0 && pz < s1 * 1.12));
+    let use3 = need3 && s3 < pz + 40.0;
+    let s_sl = if use3 { s3 } else { s1 };
 
-    let kp = if pz < 300.0 { 0.32 } else { 0.08 };
-    let kd = if pz < 300.0 { 0.90 } else { 0.40 };
+    u.n_engines = if use3 {
+        N_ENGINES_ENTRY
+    } else {
+        N_ENGINES_LANDING
+    };
+    if !engine_on && pz > s_sl && pz > h_land + 12.0 {
+        u.throttle = 0.0;
+        u.n_engines = 0;
+    } else {
+        let denom = (2.0 * (pz - h_land).max(2.0)).max(1.0);
+        let a_need = (v_down * v_down - v_land * v_land).max(0.0) / denom;
+        if a_need > a1 * 1.08 && pz > 400.0 {
+            u.n_engines = N_ENGINES_ENTRY;
+        }
+        let t_avail = MERLIN_THRUST_SL_N * u.n_engines.max(1) as f64;
+        u.throttle = saturate((a_need + G0) * nav.mass / t_avail.max(1.0)).max(THROTTLE_MIN);
+    }
+
+    let az_cmd = (if u.n_engines == 0 {
+        2.0
+    } else {
+        u.throttle * MERLIN_THRUST_SL_N * u.n_engines as f64 / nav.mass
+    })
+    .max(2.0);
+    let kp = if pz < 300.0 { 0.18 } else { 0.08 };
+    let kd = if pz < 300.0 { 1.75 } else { 0.45 };
     let reach = if nav.range_h > 2_000.0 { 0.15 } else { 1.0 };
     let ax = (-kp * nav.pos_enu.x - kd * nav.v_enu.x) * reach;
     let ay = (-kp * nav.pos_enu.y - kd * nav.v_enu.y) * reach;
     let horiz = sqrt(ax * ax + ay * ay);
-    let max_tilt = if pz < 60.0 { 0.10 } else { 0.32 };
+    let max_tilt = if pz < 200.0 { 0.132 } else { 0.32 };
     let tilt = (horiz / az_cmd.max(2.0)).min(max_tilt);
     if horiz > 1e-4 {
         let hdir = (nav.east * ax + nav.north * ay).normalized();
@@ -266,6 +300,57 @@ fn rtls_hover_slam(nav: &Nav, u: &mut Controls, desired_x: &mut Vec3) {
     } else {
         *desired_x = nav.up;
     }
+}
+
+fn aim_retro_to_pad(nav: &Nav, start_ecef: Vec3) -> Vec3 {
+    aim_retro_to_pad_dir(nav, -nav.v_enu.normalized(), start_ecef)
+}
+
+/// Engines-first retro, yawed onto the start→pad ground track.
+fn aim_retro_to_pad_dir(nav: &Nav, retro_enu: Vec3, start_ecef: Vec3) -> Vec3 {
+    let mut dir = retro_enu;
+    let los = Vec3::new(-nav.pos_enu.x, -nav.pos_enu.y, 0.0);
+    let r = los.norm();
+    if r > 80.0 {
+        let los_h = los / r;
+        let vh = Vec3::new(nav.v_enu.x, nav.v_enu.y, 0.0);
+        let vn = vh.norm();
+        let sin_err = if vn > 15.0 {
+            (vh.x * los_h.y - vh.y * los_h.x) / vn
+        } else {
+            0.0
+        };
+        let k = if nav.alt > 50_000.0 { 0.90 } else { 1.10 };
+        let yaw = clamp(sin_err * k, -0.55, 0.55);
+        dir.x += -los_h.y * yaw;
+        dir.y += los_h.x * yaw;
+        let off = corridor_enu(nav, start_ecef);
+        let cr = off.norm();
+        if cr > 80.0 {
+            let pull = clamp(cr / 12_000.0, 0.0, 0.80);
+            dir.x += -off.x / cr * pull;
+            dir.y += -off.y / cr * pull;
+        }
+        let n = dir.norm();
+        if n > 1e-8 {
+            dir = dir / n;
+        }
+    }
+    enu_to_approx(dir, nav)
+}
+
+fn corridor_enu(nav: &Nav, start_ecef: Vec3) -> Vec3 {
+    let g = pad_geodetic();
+    let s = ecef_to_enu(start_ecef, pad_ecef(), g.lat, g.lon);
+    let ab = Vec3::new(-s.x, -s.y, 0.0);
+    let ap = Vec3::new(nav.pos_enu.x - s.x, nav.pos_enu.y - s.y, 0.0);
+    let len2 = ab.norm_squared().max(1.0);
+    let t = clamp(ap.dot(ab) / len2, -0.15, 1.15);
+    Vec3::new(
+        nav.pos_enu.x - (s.x + ab.x * t),
+        nav.pos_enu.y - (s.y + ab.y * t),
+        0.0,
+    )
 }
 
 /// Rough remaining ground range to impact. At 65 km / 4.7 km/s this
@@ -292,7 +377,7 @@ pub fn attitude_command(
     let err_body = Vec3::new(err.dot(body_x), err.dot(body_y), err.dot(body_z));
     // Slow rate command (≤ ~8 deg/s) so TVC cannot pump a tumble.
     let wmax = match phase {
-        Phase::Landing if q_dyn < 12_000.0 => 0.35,
+        Phase::Landing if q_dyn < 12_000.0 => 0.22,
         Phase::Glide if q_dyn < 110_000.0 => 0.32,
         Phase::Landing if q_dyn < 40_000.0 => 0.28,
         _ => 0.12,
@@ -324,7 +409,11 @@ pub fn attitude_command(
     let gmax = if (phase == Phase::Landing && q_dyn < 20_000.0)
         || (phase == Phase::Glide && q_dyn < 20_000.0)
     {
-        GIMBAL_MAX_RAD
+        if phase == Phase::Landing && q_dyn < 8_000.0 {
+            GIMBAL_MAX_RAD * 0.22
+        } else {
+            GIMBAL_MAX_RAD
+        }
     } else {
         0.0
     };
@@ -352,6 +441,11 @@ pub fn corridor_radius_for(alt: f64, scenario: Scenario) -> f64 {
 
 pub fn corridor_violated(nav: &Nav, offset: f64, scenario: Scenario) -> bool {
     if scenario.is_terminal_hop() {
+        return false;
+    }
+    // Fins are dead below ~4 kPa (~45 km on this trajectory). An ENU-chord
+    // miss in vacuum is not a steer-able fault.
+    if nav.alt > 45_000.0 {
         return false;
     }
     offset > corridor_radius_for(nav.alt, scenario)

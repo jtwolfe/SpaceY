@@ -57,6 +57,7 @@ export type Snapshot = {
   lights?: number;
   relights?: number;
   weather_dir_off?: number;
+  guide_until?: number;
 };
 
 export type PackedTrails = {
@@ -98,6 +99,7 @@ export type TrainInfo = {
   hidden?: number;
   n_weights?: number;
   growths?: number;
+  restarts?: number;
   land_rate?: number;
   promote_ready?: boolean;
   promote_to?: number;
@@ -113,4 +115,7 @@ export type TrainInfo = {
   live_miss?: number;
   last_impact?: number;
   last_miss?: number;
+  h_max?: number;
+  h_frac?: number;
+  slam_divert?: boolean;
 };

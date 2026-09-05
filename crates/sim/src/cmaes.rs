@@ -1,13 +1,16 @@
-//! Hansen CMA-ES trainer for the MLP policy.
+//! Hansen **sep-CMA-ES** trainer for a frozen 8-hidden MLP (CMA-NeuroES).
 //!
-//! Rank-μ + rank-1 covariance, Cholesky sampling. Population is large so the
-//! browser can draw a whole generation at once (swarm trails).
+//! Diagonal covariance only. Population is large so the browser can draw a
+//! whole generation at once (swarm trails). Topology does not grow.
 
+use crate::constants::{MIX_GENS, RAJS_OWN_FRAC, SIGMA_LIVE_MIN};
 use crate::guidance::TermReason;
 use crate::math::{cos, exp, ln, sqrt};
-use crate::policy::{expand_hidden, n_weights, HIDDEN_MAX, HIDDEN_START};
+use crate::policy::{
+    apply_plane_lock_mask, n_weights, plane_lock_weight_mask, HIDDEN_START,
+};
 use crate::scenario::{Scenario, STAGE_COUNT};
-use crate::sim::{run_episode_traced, EpisodeTrace};
+use crate::sim::{run_episode_opts, EpisodeOpts, EpisodeTrace};
 use crate::wind::{sample_weather_var, Weather};
 use rand::rngs::SmallRng;
 use rand::Rng;
@@ -17,6 +20,8 @@ use serde::{Deserialize, Serialize};
 pub const LAMBDA: usize = 128;
 pub const MU: usize = 32;
 const HISTORY_CAP: usize = 80;
+const BRAIN_VERSION: u32 = 2;
+const RESTART_GENS: u32 = 40;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct CandidateStat {
@@ -45,6 +50,7 @@ pub struct TrainInfo {
     pub hidden: u32,
     pub n_weights: u32,
     pub growths: u32,
+    pub restarts: u32,
     pub land_rate: f64,
     pub promote_ready: bool,
     pub promote_to: i32,
@@ -60,6 +66,9 @@ pub struct TrainInfo {
     pub live_miss: u32,
     pub last_impact: u32,
     pub last_miss: u32,
+    pub h_max: f64,
+    pub h_frac: f64,
+    pub slam_divert: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -131,9 +140,8 @@ pub struct Trainer {
     pub scenario_seed: u32,
     mean: Vec<f64>,
     sigma: f64,
-    /// Cholesky factor L of C (lower), row-major n×n.
-    l: Vec<f64>,
-    c: Vec<f64>,
+    /// sep-CMA: sqrt of the diagonal of C. Sampling is x = m + σ (d ⊙ z).
+    d: Vec<f64>,
     pc: Vec<f64>,
     ps: Vec<f64>,
     weights_w: Vec<f64>,
@@ -158,7 +166,7 @@ pub struct Trainer {
     improved_best: bool,
     hidden: usize,
     gens_since_best: u32,
-    growths: u32,
+    restarts: u32,
     land_streak: u32,
     promote_ready: bool,
     promoted: bool,
@@ -169,6 +177,10 @@ pub struct Trainer {
     mix_hard_pad: bool,
     /// Champion that earned the last promote — used to undo the current stage.
     stage_anchor: Option<StageAnchor>,
+    /// RAJS: 1 = guide may fly the whole timeout; 0 = net owns T+0.
+    h_frac: f64,
+    land_ema: f64,
+    slam_divert: bool,
 }
 
 impl Trainer {
@@ -194,8 +206,7 @@ impl Trainer {
             scenario_seed: seed,
             mean: vec![0.0; n],
             sigma: 0.28,
-            l: identity(n),
-            c: identity(n),
+            d: vec![1.0; n],
             pc: vec![0.0; n],
             ps: vec![0.0; n],
             weights_w,
@@ -220,7 +231,7 @@ impl Trainer {
             improved_best: false,
             hidden: HIDDEN_START,
             gens_since_best: 0,
-            growths: 0,
+            restarts: 0,
             land_streak: 0,
             promote_ready: false,
             promoted: false,
@@ -230,6 +241,9 @@ impl Trainer {
             mix_next: None,
             mix_hard_pad: false,
             stage_anchor: None,
+            h_frac: 1.0,
+            land_ema: 0.0,
+            slam_divert: false,
         }
     }
 
@@ -245,6 +259,14 @@ impl Trainer {
         self.mix_hard_pad && self.mix_left > 0
     }
 
+    pub fn slam_divert(&self) -> bool {
+        self.slam_divert
+    }
+
+    pub fn any_success(&self) -> bool {
+        self.last_successes > 0 || self.live_paths.iter().any(|p| p.success)
+    }
+
     fn dim(&self) -> usize {
         self.mean.len()
     }
@@ -252,7 +274,7 @@ impl Trainer {
     /// Drop CMA-ES state when the mission is reset.
     pub fn reset_policy(&mut self) {
         self.hidden = HIDDEN_START;
-        self.growths = 0;
+        self.restarts = 0;
         self.gens_since_best = 0;
         self.land_streak = 0;
         self.promote_ready = false;
@@ -261,14 +283,16 @@ impl Trainer {
         self.mix_next = None;
         self.mix_hard_pad = false;
         self.stage_anchor = None;
+        self.h_frac = 1.0;
+        self.land_ema = 0.0;
+        self.slam_divert = false;
         let n = n_weights(self.hidden);
         self.running = false;
         self.generation = 0;
         self.episodes = 0;
         self.mean = vec![0.0; n];
         self.sigma = 0.28;
-        self.l = identity(n);
-        self.c = identity(n);
+        self.d = vec![1.0; n];
         self.pc = vec![0.0; n];
         self.ps = vec![0.0; n];
         self.best_ever = f64::NEG_INFINITY;
@@ -297,9 +321,8 @@ impl Trainer {
         self.running = running;
         self.generation = 0;
         self.episodes = 0;
-        self.sigma = (self.sigma * 1.25).clamp(0.12, 0.45);
-        self.l = identity(n);
-        self.c = identity(n);
+        self.sigma = (self.sigma * 1.15).max(SIGMA_LIVE_MIN).clamp(SIGMA_LIVE_MIN, 0.45);
+        self.d = vec![1.0; n];
         self.pc = vec![0.0; n];
         self.ps = vec![0.0; n];
         self.best_ever = f64::NEG_INFINITY;
@@ -324,6 +347,8 @@ impl Trainer {
         self.mix_left = 0;
         self.mix_next = None;
         self.mix_hard_pad = false;
+        self.h_frac = 1.0;
+        self.land_ema = 0.0;
         if running {
             self.sample_generation();
         }
@@ -339,7 +364,7 @@ impl Trainer {
     }
 
     fn apply_stage_anchor(&mut self, anchor: &StageAnchor) -> bool {
-        let hidden = (anchor.hidden as usize).clamp(HIDDEN_START, HIDDEN_MAX);
+        let hidden = HIDDEN_START;
         let n = n_weights(hidden);
         if anchor.weights.len() != n || anchor.mean.len() != n {
             return false;
@@ -347,7 +372,7 @@ impl Trainer {
         self.hidden = hidden;
         self.best_weights = anchor.weights.clone();
         self.mean = anchor.mean.clone();
-        self.sigma = anchor.sigma.clamp(0.02, 1.4);
+        self.sigma = anchor.sigma.max(SIGMA_LIVE_MIN).clamp(SIGMA_LIVE_MIN, 1.4);
         true
     }
 
@@ -403,12 +428,34 @@ impl Trainer {
         self.mix_left = 0;
         self.mix_hard_pad = false;
         self.scenario = next;
+        if next == Scenario::Slam {
+            self.slam_divert = false;
+        }
         if next == Scenario::Wind && self.wind_scale < 0.4 {
             self.wind_scale = 1.0;
         }
         self.promoted = true;
         self.retain_brain();
+        if next == Scenario::Attitude {
+            self.inflate_unlocked_axes();
+        }
         true
+    }
+
+    fn inflate_unlocked_axes(&mut self) {
+        let mask = plane_lock_weight_mask(self.hidden);
+        for (i, freeze) in mask.iter().enumerate() {
+            if i >= self.d.len() {
+                break;
+            }
+            if *freeze {
+                // Newly unmasked 6DOF slices: start at 0, not tanh rails, with
+                // a slightly larger diagonal so CMA actually searches them.
+                self.mean[i] = 0.0;
+                self.best_weights[i] = 0.0;
+                self.d[i] = 1.25;
+            }
+        }
     }
 
     pub fn take_promoted(&mut self) -> bool {
@@ -435,18 +482,31 @@ impl Trainer {
         self.pending_y.clear();
         self.pending_f = vec![None; LAMBDA];
         self.eval_index = 0;
+        let lock = self.scenario.plane_lock();
         for _ in 0..LAMBDA {
-            let z: Vec<f64> = (0..n).map(|_| std_norm(&mut self.rng)).collect();
-            let y = chol_mul(&self.l, &z, n);
-            let x: Vec<f64> = self
-                .mean
-                .iter()
-                .zip(y.iter())
-                .map(|(m, yi)| m + self.sigma * *yi)
-                .collect();
+            let mut z: Vec<f64> = (0..n).map(|_| std_norm(&mut self.rng)).collect();
+            let mut y = vec![0.0; n];
+            let mut x = vec![0.0; n];
+            for i in 0..n {
+                y[i] = self.d[i] * z[i];
+                x[i] = self.mean[i] + self.sigma * y[i];
+            }
+            if lock {
+                apply_plane_lock_mask(&mut x, self.hidden);
+                let mask = plane_lock_weight_mask(self.hidden);
+                for (i, freeze) in mask.iter().enumerate() {
+                    if *freeze {
+                        y[i] = 0.0;
+                        z[i] = 0.0;
+                    }
+                }
+            }
             self.pending.push(x);
             self.pending_z.push(z);
             self.pending_y.push(y);
+        }
+        if lock {
+            apply_plane_lock_mask(&mut self.mean, self.hidden);
         }
     }
 
@@ -483,6 +543,8 @@ impl Trainer {
             } else {
                 self.scenario
             };
+            let timeout = ep_scen.timeout();
+            let guide_until = self.rng.gen::<f64>() * self.h_frac * timeout;
             let (wx, wind) = sample_weather_var(
                 ep_scen,
                 self.wind_scale.max(0.0),
@@ -492,7 +554,7 @@ impl Trainer {
                 &mut self.rng,
             );
             self.weather = wx;
-            let tr = run_episode_traced(
+            let tr = run_episode_opts(
                 &self.pending[self.eval_index],
                 seed,
                 self.destroy,
@@ -500,7 +562,11 @@ impl Trainer {
                 ep_scen,
                 wx,
                 true,
-                hard_pad,
+                EpisodeOpts {
+                    hard_pad,
+                    slam_divert: self.slam_divert || ep_scen != Scenario::Slam,
+                    guide_until,
+                },
             );
             self.pending_f[self.eval_index] = Some((tr.fitness, tr.term));
             self.live_paths.push(tr);
@@ -553,21 +619,48 @@ impl Trainer {
             .iter()
             .filter(|p| matches!(p, Some((_, TermReason::Success))))
             .count() as u32;
+        let mut pos_lands = 0u32;
+        let mut neg_lands = 0u32;
+        for p in &self.live_paths {
+            if p.success {
+                if p.spawn_ve >= 0.0 {
+                    pos_lands += 1;
+                } else {
+                    neg_lands += 1;
+                }
+            }
+        }
+        let land_frac = self.last_successes as f64 / LAMBDA as f64;
+        self.land_ema = 0.75 * self.land_ema + 0.25 * land_frac;
+        if self.land_ema >= 0.22 {
+            self.h_frac = (self.h_frac * 0.90).max(0.0);
+        } else if land_frac < 0.05 {
+            self.h_frac = (self.h_frac + 0.06).min(1.0);
+        }
+        let net_owns = self.h_frac <= RAJS_OWN_FRAC + 1e-9;
+        let both_signs = !(self.scenario == Scenario::Slam && self.slam_divert)
+            || (pos_lands >= 1 && neg_lands >= 1);
         let was_mixing = self.mix_left > 0;
         if !was_mixing {
-            let land_frac = self.last_successes as f64 / LAMBDA as f64;
-            if land_frac + 1e-9 >= 0.30 {
+            if land_frac + 1e-9 >= 0.30 && net_owns {
                 self.land_streak = self.land_streak.saturating_add(1);
             } else {
                 self.land_streak = 0;
                 self.promote_ready = false;
             }
-            if self.land_streak >= 3 {
-                if let Some(next) = self.scenario.next_gate() {
-                    self.promote_ready = true;
-                    self.mix_next = Some(next);
-                    self.mix_left = 2;
-                    self.mix_hard_pad = self.scenario == Scenario::Pad;
+            if self.land_streak >= 3 && net_owns {
+                if self.scenario == Scenario::Slam && !self.slam_divert {
+                    self.slam_divert = true;
+                    self.land_streak = 0;
+                    self.h_frac = self.h_frac.max(0.55);
+                    self.promote_ready = false;
+                } else if both_signs {
+                    if let Some(next) = self.scenario.next_gate() {
+                        self.promote_ready = true;
+                        self.mix_next = Some(next);
+                        self.mix_left = MIX_GENS;
+                        self.mix_hard_pad = self.scenario == Scenario::Pad;
+                    }
                 }
             }
         }
@@ -608,56 +701,66 @@ impl Trainer {
             }
         }
         self.mean = mw;
+        if self.scenario.plane_lock() {
+            apply_plane_lock_mask(&mut self.mean, self.hidden);
+        }
 
-        let c_sigma = (self.mu_eff + 2.0) / (n as f64 + self.mu_eff + 5.0);
+        let n_f = n as f64;
+        let c_sigma = (self.mu_eff + 2.0) / (n_f + self.mu_eff + 5.0);
         let d_sigma = 1.0
-            + 2.0 * (0.0f64).max(sqrt((self.mu_eff - 1.0) / (n as f64 + 1.0)) - 1.0)
+            + 2.0 * (0.0f64).max(sqrt((self.mu_eff - 1.0) / (n_f + 1.0)) - 1.0)
             + c_sigma;
-        let c_c = (4.0 + self.mu_eff / n as f64) / (n as f64 + 4.0 + 2.0 * self.mu_eff / n as f64);
-        let c_1 = 2.0 / ((n as f64 + 1.3).powi(2) + self.mu_eff);
-        let c_mu = (1.0 - c_1)
-            .min(2.0 * (self.mu_eff - 2.0 + 1.0 / self.mu_eff) / ((n as f64 + 2.0).powi(2) + self.mu_eff));
+        let c_c = (4.0 + self.mu_eff / n_f) / (n_f + 4.0 + 2.0 * self.mu_eff / n_f);
+        let mut c_1 = 2.0 / ((n_f + 1.3).powi(2) + self.mu_eff);
+        let mut c_mu = (1.0 - c_1).min(
+            2.0 * (self.mu_eff - 2.0 + 1.0 / self.mu_eff)
+                / ((n_f + 2.0).powi(2) + self.mu_eff),
+        );
+        // Ros & Hansen 2008: diagonal C learns ~n times fewer entries.
+        let sep = (n_f + 2.0) / 3.0;
+        c_1 = (c_1 * sep).min(1.0);
+        c_mu = (c_mu * sep).min(1.0 - c_1);
+
+        let mask = if self.scenario.plane_lock() {
+            plane_lock_weight_mask(self.hidden)
+        } else {
+            vec![false; n]
+        };
 
         for j in 0..n {
+            if mask[j] {
+                self.ps[j] = 0.0;
+                continue;
+            }
             self.ps[j] = (1.0 - c_sigma) * self.ps[j]
                 + (sqrt(c_sigma * (2.0 - c_sigma) * self.mu_eff)) * zw[j];
         }
         let ps_norm = l2(&self.ps);
-        let chi_n = sqrt(n as f64) * (1.0 - 1.0 / (4.0 * n as f64) + 1.0 / (21.0 * (n as f64).powi(2)));
+        let chi_n = sqrt(n_f) * (1.0 - 1.0 / (4.0 * n_f) + 1.0 / (21.0 * n_f.powi(2)));
         self.sigma *= exp((c_sigma / d_sigma) * (ps_norm / chi_n - 1.0));
         self.sigma = self.sigma.clamp(0.02, 1.4);
 
         for j in 0..n {
+            if mask[j] {
+                self.pc[j] = 0.0;
+                self.d[j] = 1.0;
+                continue;
+            }
             self.pc[j] = (1.0 - c_c) * self.pc[j]
                 + (sqrt(c_c * (2.0 - c_c) * self.mu_eff)) * yw[j];
-        }
-
-        // C ← (1 − c1 − cμ) C + c1 pc pcᵀ + cμ Σ w y yᵀ
-        let decay = 1.0 - c_1 - c_mu;
-        for i in 0..n {
-            for j in 0..=i {
-                let idx = i * n + j;
-                let mut v = decay * self.c[idx] + c_1 * self.pc[i] * self.pc[j];
-                for (k, &oi) in order.iter().take(MU).enumerate() {
-                    v += c_mu * self.weights_w[k] * self.pending_y[oi][i] * self.pending_y[oi][j];
-                }
-                self.c[idx] = v;
-                self.c[j * n + i] = v;
+            let mut y2 = 0.0;
+            for (k, &oi) in order.iter().take(MU).enumerate() {
+                let yi = self.pending_y[oi][j];
+                y2 += self.weights_w[k] * yi * yi;
             }
-            self.c[i * n + i] += 1e-10;
-        }
-        if let Some(l) = cholesky(&self.c, n) {
-            self.l = l;
-        } else {
-            self.c = identity(n);
-            for i in 0..n {
-                self.c[i * n + i] = 1e-6;
-            }
-            self.l = cholesky(&self.c, n).unwrap_or_else(|| identity(n));
+            let cii = (1.0 - c_1 - c_mu) * self.d[j] * self.d[j]
+                + c_1 * self.pc[j] * self.pc[j]
+                + c_mu * y2;
+            self.d[j] = sqrt(cii.max(1e-12)).clamp(1e-4, 10.0);
         }
 
         self.generation += 1;
-        self.maybe_grow();
+        self.maybe_restart();
         if opened_mix {
             self.sample_generation();
         } else if was_mixing {
@@ -672,28 +775,23 @@ impl Trainer {
         }
     }
 
-    fn maybe_grow(&mut self) {
-        if self.hidden >= HIDDEN_MAX {
+    fn maybe_restart(&mut self) {
+        if self.gens_since_best < RESTART_GENS {
             return;
         }
-        if self.gens_since_best < 14 {
+        if self.sigma > 0.05 {
             return;
         }
-        if self.sigma > 0.12 {
-            return;
-        }
-        let h0 = self.hidden;
-        self.hidden += 1;
-        self.mean = expand_hidden(&self.mean, h0);
-        self.best_weights = expand_hidden(&self.best_weights, h0);
-        let n = n_weights(self.hidden);
-        self.c = identity(n);
-        self.l = identity(n);
+        let n = self.dim();
+        self.sigma = 0.28;
+        self.d = vec![1.0; n];
         self.pc = vec![0.0; n];
         self.ps = vec![0.0; n];
-        self.sigma = (self.sigma * 1.35).clamp(0.10, 0.40);
         self.gens_since_best = 0;
-        self.growths += 1;
+        self.restarts += 1;
+        if self.scenario.plane_lock() {
+            apply_plane_lock_mask(&mut self.mean, self.hidden);
+        }
     }
 
     pub fn info(&self) -> TrainInfo {
@@ -733,7 +831,8 @@ impl Trainer {
             history_lands: self.history_lands.clone(),
             hidden: self.hidden as u32,
             n_weights: self.dim() as u32,
-            growths: self.growths,
+            growths: 0,
+            restarts: self.restarts,
             land_rate: if self.last_fitnesses.is_empty() {
                 0.0
             } else {
@@ -757,12 +856,15 @@ impl Trainer {
             live_miss: count_term_paths(&self.live_paths, TermReason::GroundMiss),
             last_impact: count_term_str(&self.last_terms, TermReason::Destroyed.as_str()),
             last_miss: count_term_str(&self.last_terms, TermReason::GroundMiss.as_str()),
+            h_max: self.h_frac * self.scenario.timeout(),
+            h_frac: self.h_frac,
+            slam_divert: self.slam_divert,
         }
     }
 
     pub fn export_brain(&self) -> String {
         let blob = BrainBlob {
-            v: 1,
+            v: BRAIN_VERSION,
             weights: self.best_weights.clone(),
             mean: self.mean.clone(),
             hidden: self.hidden as u32,
@@ -775,6 +877,8 @@ impl Trainer {
             },
             sigma: self.sigma,
             anchor: self.stage_anchor.clone(),
+            h_frac: self.h_frac,
+            slam_divert: self.slam_divert,
         };
         serde_json::to_string(&blob).unwrap_or_else(|_| "{}".into())
     }
@@ -783,37 +887,39 @@ impl Trainer {
         let Ok(blob) = serde_json::from_str::<BrainBlob>(json) else {
             return false;
         };
-        if blob.v != 1 {
+        if blob.v != BRAIN_VERSION {
             return false;
         }
-        let hidden = (blob.hidden as usize).clamp(HIDDEN_START, HIDDEN_MAX);
-        let n = n_weights(hidden);
+        if blob.hidden as usize != HIDDEN_START {
+            return false;
+        }
+        let n = n_weights(HIDDEN_START);
         if blob.weights.len() != n || blob.mean.len() != n {
             return false;
         }
-        self.hidden = hidden;
+        self.hidden = HIDDEN_START;
         self.best_weights = blob.weights;
         self.mean = blob.mean;
         self.scenario = Scenario::from_id(blob.stage);
         self.generation = blob.generation;
         self.best_ever = blob.best_ever;
-        self.sigma = blob.sigma.clamp(0.02, 1.4);
-        self.c = identity(n);
-        self.l = identity(n);
+        self.sigma = blob.sigma.max(SIGMA_LIVE_MIN).clamp(SIGMA_LIVE_MIN, 1.4);
+        self.d = vec![1.0; n];
         self.pc = vec![0.0; n];
         self.ps = vec![0.0; n];
         self.mix_left = 0;
         self.mix_next = None;
         self.mix_hard_pad = false;
         self.promote_ready = false;
+        self.h_frac = blob.h_frac.clamp(0.0, 1.0);
+        self.slam_divert = blob.slam_divert;
         self.pending.clear();
         self.pending_z.clear();
         self.pending_y.clear();
         self.pending_f.clear();
         self.eval_index = 0;
         self.stage_anchor = blob.anchor.filter(|a| {
-            let h = (a.hidden as usize).clamp(HIDDEN_START, HIDDEN_MAX);
-            let an = n_weights(h);
+            let an = n_weights(HIDDEN_START);
             a.weights.len() == an && a.mean.len() == an
         });
         true
@@ -832,6 +938,14 @@ struct BrainBlob {
     sigma: f64,
     #[serde(default)]
     anchor: Option<StageAnchor>,
+    #[serde(default = "default_h_frac")]
+    h_frac: f64,
+    #[serde(default)]
+    slam_divert: bool,
+}
+
+fn default_h_frac() -> f64 {
+    1.0
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -848,47 +962,6 @@ fn count_term_paths(paths: &[EpisodeTrace], want: TermReason) -> u32 {
 
 fn count_term_str(terms: &[String], want: &str) -> u32 {
     terms.iter().filter(|t| t.as_str() == want).count() as u32
-}
-
-fn identity(n: usize) -> Vec<f64> {
-    let mut m = vec![0.0; n * n];
-    for i in 0..n {
-        m[i * n + i] = 1.0;
-    }
-    m
-}
-
-fn chol_mul(l: &[f64], z: &[f64], n: usize) -> Vec<f64> {
-    let mut y = vec![0.0; n];
-    for i in 0..n {
-        let mut s = 0.0;
-        for j in 0..=i {
-            s += l[i * n + j] * z[j];
-        }
-        y[i] = s;
-    }
-    y
-}
-
-fn cholesky(a: &[f64], n: usize) -> Option<Vec<f64>> {
-    let mut l = vec![0.0; n * n];
-    for i in 0..n {
-        for j in 0..=i {
-            let mut s = a[i * n + j];
-            for k in 0..j {
-                s -= l[i * n + k] * l[j * n + k];
-            }
-            if i == j {
-                if s <= 1e-18 {
-                    return None;
-                }
-                l[i * n + j] = sqrt(s);
-            } else {
-                l[i * n + j] = s / l[j * n + j];
-            }
-        }
-    }
-    Some(l)
 }
 
 fn l2(v: &[f64]) -> f64 {
@@ -1037,5 +1110,98 @@ mod tests {
         u.reset_latest_phase();
         assert!((u.best_weights[0] - 0.31).abs() < 1e-12);
         assert!(!u.import_brain("{}"));
+        let n = n_weights(HIDDEN_START);
+        let v1 = serde_json::json!({
+            "v": 1,
+            "weights": vec![0.0; n],
+            "mean": vec![0.0; n],
+            "hidden": 8,
+            "stage": 0,
+            "generation": 0,
+            "best_ever": 0.0,
+            "sigma": 0.3,
+        });
+        assert!(!u.import_brain(&v1.to_string()));
+        let grown = serde_json::json!({
+            "v": 2,
+            "weights": vec![0.0; n],
+            "mean": vec![0.0; n],
+            "hidden": 16,
+            "stage": 0,
+            "generation": 0,
+            "best_ever": 0.0,
+            "sigma": 0.3,
+        });
+        assert!(!u.import_brain(&grown.to_string()));
+    }
+
+    #[test]
+    fn hidden_stays_frozen() {
+        let t = Trainer::new(1, true, 0.0);
+        assert_eq!(t.hidden, 8);
+        assert_eq!(t.dim(), 210);
+        assert_eq!(t.info().growths, 0);
+        assert_eq!(HIDDEN_START, 8);
+    }
+
+    #[test]
+    fn pad_samples_zero_locked_outputs() {
+        let mut t = Trainer::new(1, true, 0.0);
+        t.scenario = Scenario::Pad;
+        t.start();
+        let mask = crate::policy::plane_lock_weight_mask(8);
+        for x in &t.pending {
+            for (i, freeze) in mask.iter().enumerate() {
+                if *freeze {
+                    assert_eq!(x[i], 0.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn retain_and_import_keep_live_sigma() {
+        let mut t = Trainer::new(1, true, 0.0);
+        t.sigma = 0.05;
+        t.retain_brain();
+        assert!(t.sigma >= SIGMA_LIVE_MIN - 1e-12);
+        t.sigma = 0.05;
+        let json = t.export_brain();
+        let mut u = Trainer::new(2, true, 0.0);
+        assert!(u.import_brain(&json));
+        assert!(u.sigma >= SIGMA_LIVE_MIN - 1e-12);
+        assert!((u.h_frac - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn stuck_restart_does_not_grow_hidden() {
+        let mut t = Trainer::new(1, true, 0.0);
+        t.gens_since_best = RESTART_GENS;
+        t.sigma = 0.04;
+        t.maybe_restart();
+        assert_eq!(t.hidden, 8);
+        assert_eq!(t.dim(), 210);
+        assert_eq!(t.restarts, 1);
+        assert!((t.sigma - 0.28).abs() < 1e-12);
+    }
+
+    #[test]
+    fn sixdof_unmask_zeros_locked_slice_and_inflates_sigma() {
+        let mut t = Trainer::new(1, true, 0.0);
+        t.mean.fill(0.5);
+        t.best_weights.fill(0.5);
+        t.d.fill(1.0);
+        t.inflate_unlocked_axes();
+        let mask = plane_lock_weight_mask(8);
+        for (i, freeze) in mask.iter().enumerate() {
+            if *freeze {
+                assert_eq!(t.mean[i], 0.0, "mean {i}");
+                assert_eq!(t.best_weights[i], 0.0, "w {i}");
+                assert!((t.d[i] - 1.25).abs() < 1e-12, "d {i}");
+            } else {
+                assert!((t.mean[i] - 0.5).abs() < 1e-12, "keep mean {i}");
+                assert!((t.d[i] - 1.0).abs() < 1e-12, "keep d {i}");
+            }
+        }
     }
 }

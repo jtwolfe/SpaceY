@@ -83,6 +83,19 @@ pub const ENGINE_MIN_BURN_S: f64 = 2.5;
 pub const ENGINE_RESTART_DELAY_S: f64 = 6.0;
 /// Fitness cost per extra ignition after the first. A land still wins.
 pub const RELIGHT_FITNESS: f64 = 320.0;
+/// Hop contact speed tax: 40 × min(speed−8, cap). Distinguishes 90 vs 180 m/s
+/// without letting a 180 m/s slap beat a 400 m hang.
+pub const HOP_SPEED_TAX: f64 = 40.0;
+pub const HOP_SPEED_TAX_OVER_MPS: f64 = 160.0;
+/// Horizontal range on hops. Competitive with the speed tax (~4k at 200 m).
+pub const RANGE_H_WEIGHT: f64 = 20.0;
+pub const RANGE_H_CAP_M: f64 = 250.0;
+/// sep-CMA step-size floor after promote / restore. Do not re-apply a dead σ.
+pub const SIGMA_LIVE_MIN: f64 = 0.18;
+/// Mix this many gens before committing a promote.
+pub const MIX_GENS: u32 = 6;
+/// Promote only once the guide horizon is this fraction of the stage timeout.
+pub const RAJS_OWN_FRAC: f64 = 0.35;
 
 /// Titanium grid fins (Block 5): four surfaces, roughly 1.2 × 1.5 m planform
 /// in public photos / patent drawings. Lattice Cd at δ=0 is the weathercock
