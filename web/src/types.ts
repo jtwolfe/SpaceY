@@ -53,6 +53,7 @@ export type Snapshot = {
   v_slam?: number;
   slam_xyz?: number[] | Float32Array;
   plane_lock?: boolean;
+  helicity_s?: number;
   lights?: number;
   relights?: number;
   weather_dir_off?: number;

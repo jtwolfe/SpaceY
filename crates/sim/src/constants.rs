@@ -66,6 +66,17 @@ pub const FIN_Q_FULL_PA: f64 = 8_000.0;
 /// Score weight on pre-fade |fin|/max × FIN_RAIL_Q_PA / (FIN_RAIL_Q_PA + q).
 pub const FIN_RAIL_TAX: f64 = 400.0;
 pub const FIN_RAIL_Q_PA: f64 = 4_000.0;
+/// Hop-only tax on integrated ground-track turn rate × q/(q+FIN_RAIL_Q_PA).
+/// |ω · v̂_air| is ~0 at slam q (roll damper); the Pad-camera corkscrew is ψ̇
+/// of v_h. A planar banana (any azimuth) has ψ̇ ≈ 0. Cap so a helix slap
+/// still beats a 400 m hang. Glide/RTLS do not accumulate (entry bank).
+pub const HELICITY_TAX: f64 = 400.0;
+/// Heading-rate deadband (rad/s). A 0.007/s fin banana is ignored; a
+/// Pad-camera spiral (~0.2/s) pays.
+pub const HELICITY_DEADBAND_RAD_S: f64 = 0.05;
+pub const HELICITY_CAP_S: f64 = 8.0;
+/// Ignore hover-scale horizontal speed so pad ψ̇ is not 0/0.
+pub const HELICITY_AIRSPEED_MPS: f64 = 8.0;
 /// Once lit, a Merlin cannot chatter off at the 10 Hz policy tick.
 pub const ENGINE_MIN_BURN_S: f64 = 2.5;
 /// Shutdown → restart delay. PWM-by-relight is not a throttle.

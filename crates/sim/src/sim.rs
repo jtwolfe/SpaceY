@@ -88,6 +88,9 @@ pub struct Sim {
     pub tumble_s: f64,
     /// Peak of (mean |pre-fade fin|/max) × low-q weight. Pad rails, not glide divert.
     pub max_fin_rail_w: f64,
+    /// Hop integral of (|ψ̇_h| − deadband)+ × q/(q+4 kPa). Corkscrew tax.
+    pub helicity_s: f64,
+    v_enu_prev: Vec3,
     pub seed: u32,
     held_controls: Controls,
     last_policy_t: f64,
@@ -197,6 +200,8 @@ impl Sim {
             max_tilt: 0.0,
             tumble_s: 0.0,
             max_fin_rail_w: 0.0,
+            helicity_s: 0.0,
+            v_enu_prev: Vec3::ZERO,
             seed,
             held_controls: Controls::default(),
             last_policy_t: -1.0,
@@ -205,6 +210,7 @@ impl Sim {
             engine: EngineGate::default(),
         };
         s.refresh_nav();
+        s.v_enu_prev = s.last_nav.v_enu;
         s.v_slam = slam_v_ref(s.last_nav.engine_alt, wet_mass(fuel));
         s.phase = classify_phase(
             &s.last_nav,
@@ -481,6 +487,16 @@ impl Sim {
         if self.last_aoa.abs() > 25.0 * std::f64::consts::PI / 180.0 && self.last_aero_q > 2_000.0 {
             self.tumble_s += dt;
         }
+        if self.scenario.is_terminal_hop() {
+            let v = self.last_nav.v_enu;
+            self.helicity_s += helicity_step(
+                v,
+                self.v_enu_prev,
+                self.last_aero_q,
+                dt,
+            );
+            self.v_enu_prev = v;
+        }
 
         let (q_lim, g_lim, qa_lim, rate_lim) =
             (Q_DESTROY_PA, G_DESTROY, Q_ALPHA_DESTROY, RATE_DESTROY_RAD_S);
@@ -687,6 +703,7 @@ impl Sim {
             v_slam: self.v_slam,
             slam_xyz: self.slam_curve_xyz(),
             plane_lock: self.scenario.plane_lock(),
+            helicity_s: self.helicity_s,
             lights: self.engine.lights,
             relights: self.engine.relights,
         }
@@ -750,6 +767,7 @@ pub struct Snapshot {
     pub v_slam: f64,
     pub slam_xyz: Vec<f32>,
     pub plane_lock: bool,
+    pub helicity_s: f64,
     pub lights: u32,
     pub relights: u32,
 }
@@ -757,6 +775,23 @@ pub struct Snapshot {
 fn slew_axis(current: f64, target: f64, rate: f64, dt: f64) -> f64 {
     let max = (rate * dt).max(0.0);
     current + (target - current).clamp(-max, max)
+}
+
+/// Ground-track heading rate of v_enu (rad/s). Plane-lock has v_n ≡ 0 ⇒ 0.
+fn hop_track_turn_rate(v: Vec3, prev: Vec3, dt: f64) -> f64 {
+    let vh2 = v.x * v.x + v.y * v.y;
+    let vh = vh2.sqrt();
+    if vh <= HELICITY_AIRSPEED_MPS || dt <= 1e-9 {
+        0.0
+    } else {
+        (v.x * (v.y - prev.y) - v.y * (v.x - prev.x)) / (vh2 * dt)
+    }
+}
+
+fn helicity_step(v: Vec3, prev: Vec3, q: f64, dt: f64) -> f64 {
+    let psi_dot = hop_track_turn_rate(v, prev, dt).abs();
+    let w = q.max(0.0) / (q.max(0.0) + FIN_RAIL_Q_PA);
+    dt * (psi_dot - HELICITY_DEADBAND_RAD_S).max(0.0) * w
 }
 
 fn step_shaping(nav: &Nav, rate: f64, mdot: f64, dt: f64) -> f64 {
@@ -849,6 +884,8 @@ pub fn episode_fitness(sim: &Sim) -> f64 {
     }
     // Pre-fade rail × low-q weight. Pad 28° pays; glide q makes this ~0.
     f -= FIN_RAIL_TAX * sim.max_fin_rail_w;
+    // Hop corkscrew: ground-track turn rate. Glide/RTLS helicity_s stays 0.
+    f -= HELICITY_TAX * sim.helicity_s.min(HELICITY_CAP_S);
     f - relight_penalty(sim)
 }
 
@@ -996,6 +1033,7 @@ pub fn run_episode_traced(
 mod tests {
     use super::*;
     use crate::guidance::TermReason;
+    use crate::math::{cos, sin};
     use crate::scenario::Scenario;
     use crate::wind::Weather;
 
@@ -1171,6 +1209,136 @@ mod tests {
         assert!(
             slow > up,
             "glide sit-down with full rail tax {slow} should still beat hang {up}"
+        );
+    }
+
+    #[test]
+    fn hop_helicity_sitdown_loses_to_planar() {
+        let planar = episode_fitness(&ground_miss(hop_base()));
+        let mut helix = ground_miss(hop_base());
+        helix.helicity_s = 4.0;
+        let spin = episode_fitness(&helix);
+        assert!(
+            spin < planar,
+            "helicity sit-down {spin} should lose to planar {planar}"
+        );
+    }
+
+    #[test]
+    fn hop_helicity_cap_still_beats_hang() {
+        let mut sit = ground_miss(hop_base());
+        sit.helicity_s = HELICITY_CAP_S;
+        let hang = airborne_at(hop_base(), TermReason::Timeout, 400.0, 6.0);
+        let slow = episode_fitness(&sit);
+        let up = episode_fitness(&hang);
+        assert!(
+            slow > up,
+            "capped-helicity sit-down {slow} should still beat hang {up}"
+        );
+    }
+
+    #[test]
+    fn hop_land_dwarfs_helicity_miss() {
+        let mut land = hop_base();
+        land.term = TermReason::Success;
+        land.last_nav.engine_alt = 0.2;
+        land.last_nav.alt = 25.0;
+        land.last_nav.speed = 4.0;
+        land.last_nav.v_enu = Vec3::new(0.0, 0.0, -4.0);
+        land.last_nav.range_h = 5.0;
+        land.last_nav.tilt = 0.05;
+        let mut miss = ground_miss(hop_base());
+        miss.helicity_s = HELICITY_CAP_S;
+        let win = episode_fitness(&land);
+        let lose = episode_fitness(&miss);
+        assert!(
+            win > lose + 5_000.0,
+            "land {win} should dwarf helix miss {lose}"
+        );
+    }
+
+    fn policy_rollout(
+        scenario: Scenario,
+        seed: u32,
+        destroy: bool,
+        set: impl Fn(&mut [f64]),
+    ) -> Sim {
+        let mut sim = Sim::new_with(seed, destroy, 0.0, scenario, Weather::default());
+        sim.pilot = Pilot::Policy;
+        let h = crate::policy::HIDDEN_START;
+        let mut w = vec![0.0; crate::policy::n_weights(h)];
+        set(&mut w);
+        sim.set_weights(&w);
+        let mut guard = 0;
+        while !sim.terminated() && guard < 40_000 {
+            sim.step(sim.adaptive_dt());
+            guard += 1;
+        }
+        sim
+    }
+
+    #[test]
+    fn pad_pegged_fins_keep_helicity_near_zero() {
+        let b2 = throttle_out_bias(crate::policy::HIDDEN_START);
+        let peg = policy_rollout(Scenario::Pad, 7, true, |w| w[b2 + 3] = 3.0);
+        assert!(
+            peg.helicity_s < 0.5,
+            "pad pegged helicity {}",
+            peg.helicity_s
+        );
+        let fall = policy_rollout(Scenario::Pad, 7, true, |_| {});
+        assert!(
+            episode_fitness(&peg) < episode_fitness(&fall),
+            "pad rail still loses on fitness"
+        );
+    }
+
+    #[test]
+    fn hop_track_spiral_accumulates_helicity() {
+        let dt = 0.05;
+        let speed = 40.0;
+        let rate = 0.22;
+        let q = 12_000.0;
+        let mut prev = Vec3::new(speed, 0.0, -120.0);
+        let mut h = 0.0;
+        let mut psi: f64 = 0.0;
+        for _ in 0..80 {
+            psi += rate * dt;
+            let v = Vec3::new(speed * cos(psi), speed * sin(psi), -120.0);
+            h += super::helicity_step(v, prev, q, dt);
+            prev = v;
+        }
+        let planar = super::helicity_step(
+            Vec3::new(speed, 0.0, -120.0),
+            Vec3::new(speed - 2.0, 0.0, -120.0),
+            q,
+            dt,
+        );
+        assert!(
+            h > 0.4,
+            "spiral helicity {h} should accumulate"
+        );
+        assert!(
+            planar.abs() < 1e-12,
+            "in-plane brake should not look like a spiral {planar}"
+        );
+    }
+
+    #[test]
+    fn slam_6dof_pegged_yaw_roll_accumulates_helicity() {
+        let b2 = throttle_out_bias(crate::policy::HIDDEN_START);
+        let zero = policy_rollout(Scenario::Attitude, 11, false, |_| {});
+        let peg = policy_rollout(Scenario::Attitude, 11, false, |w| {
+            w[b2 + 4] = 3.0;
+            w[b2 + 5] = 3.0;
+        });
+        // Zero-net pegged fins only bend the track ~0.007 rad/s (under the
+        // deadband). The plant still has to run; helicity stays ~planar.
+        assert!(
+            peg.helicity_s < 0.5 && zero.helicity_s < 0.5,
+            "gentle 6DOF banana should stay under the corkscrew tax (peg {} zero {})",
+            peg.helicity_s,
+            zero.helicity_s
         );
     }
 

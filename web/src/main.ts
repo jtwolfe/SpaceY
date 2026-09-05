@@ -274,6 +274,7 @@ async function main() {
       ["Obs", s.plane_lock ? "2D pad-ENU" : "6DOF pad-ENU"],
       ["v* slam", `${fmt(s.v_slam ?? 0, 1)} m/s`],
       ["Range", `${fmt(s.range_h / 1000, 2)} km`],
+      ["Helicity", fmt(s.helicity_s ?? 0, 2)],
       ["Weather", weatherNote(s)],
       ["Term", s.term || "—", s.success ? "good" : s.terminated ? "bad" : undefined],
       ["Box", landBoxNote(s), s.success ? "good" : s.terminated && !s.success ? "warn" : undefined],
