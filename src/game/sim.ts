@@ -26,6 +26,7 @@ import {
   nominalControls,
   suicideLightAlt,
   success,
+  rtlsSuicideWindow,
   type BurnLatch,
   type Controls,
   type EntryBurn,
@@ -271,8 +272,9 @@ export class Sim {
       const vDown = Math.max(0, -this.nav.v.z);
       if (this.nav.engineAlt < 2_400 && vDown > 8) this.landingLatched = true;
       if (this.nav.engineAlt < 400) this.landingLatched = true;
+      if (this.energy >= 0.85 && rtlsSuicideWindow(this.nav)) this.landingLatched = true;
     }
-    this.phase = classifyPhase(this.nav, this.landingLatched);
+    this.phase = classifyPhase(this.nav, this.landingLatched, this.energy);
     if (this.phase === "landing" && this.entryBurn === "on") this.entryBurn = "done";
 
     const bx = this.bodyX();
@@ -314,8 +316,15 @@ export class Sim {
 
     if (this.landingIgnited && !this.landingDone && this.nav.engineAlt > GEAR_ENGINE_ALT_M) {
       if (u.nEngines <= 0 || u.throttle <= 0.02) {
-        u.nEngines = Math.max(1, u.nEngines);
-        u.throttle = Math.max(THROTTLE_MIN, u.throttle);
+        const rtlsSettle =
+          this.energy >= 0.85 &&
+          this.nav.rangeH < 22 &&
+          this.nav.engineAlt < 16 &&
+          (this.v.z > -9);
+        if (!rtlsSettle) {
+          u.nEngines = Math.max(1, u.nEngines);
+          u.throttle = Math.max(THROTTLE_MIN, u.throttle);
+        }
       }
     }
 

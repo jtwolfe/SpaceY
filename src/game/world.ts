@@ -626,17 +626,18 @@ function drawPadMarks(primary: boolean) {
 
   ctx.save();
   ctx.translate(cx, cy);
-  ctx.rotate(-0.48);
   ctx.strokeStyle = "#141414";
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   ctx.lineWidth = s * 0.038;
   const arm = s * 0.13;
   ctx.beginPath();
-  ctx.moveTo(-arm, -arm * 0.18);
-  ctx.lineTo(arm, arm * 0.18);
-  ctx.moveTo(-arm * 0.18, arm);
-  ctx.lineTo(arm * 0.18, -arm);
+  // Three equal arms, 120° apart — a Y that isn't a letter Y.
+  for (let i = 0; i < 3; i++) {
+    const a = Math.PI / 2 + (i * 2 * Math.PI) / 3;
+    ctx.moveTo(0, 0);
+    ctx.lineTo(Math.cos(a) * arm, Math.sin(a) * arm);
+  }
   ctx.stroke();
   ctx.fillStyle = "#141414";
   ctx.beginPath();

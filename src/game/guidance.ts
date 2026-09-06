@@ -75,7 +75,17 @@ export type Gains = number[];
 export const N_GAINS = 12;
 export const NOMINAL_GAINS: Gains = Array.from({ length: N_GAINS }, () => 1);
 
-export function classifyPhase(nav: Nav, landingLatched: boolean): Phase {
+export function classifyPhase(nav: Nav, landingLatched: boolean, energy = 0): Phase {
+  // RTLS: never treat a high-altitude pad overflight as a suicide window.
+  // Pad / 2 km / Glide keep the original ladder below.
+  if (energy >= 0.85) {
+    if (landingLatched) return "landing";
+    if (rtlsSuicideWindow(nav)) return "landing";
+    if (nav.alt > 78_000 && nav.q < 80 && nav.speed < 400) return "exo";
+    if (nav.speed > 900 && nav.alt > 35_000) return "entry";
+    if (nav.alt > 2_600) return "glide";
+    return "landing";
+  }
   if (landingLatched) return "landing";
   if (shouldStartLanding(nav)) return "landing";
   if (nav.alt > 78_000 && nav.q < 80 && nav.speed < 400) return "exo";
@@ -98,6 +108,19 @@ export function classifyPhase(nav: Nav, landingLatched: boolean): Phase {
 /** Still fast and high-q: stay on unpowered glide aim, not the near-vertical landing lean. */
 function hotUnpoweredCoast(nav: Nav) {
   return nav.speed > 210 && nav.q > 8_000 && nav.alt > 2_600;
+}
+
+/** RTLS: light only when 1 Merlin + some drag still needs a real suicide, not a 5 km hover. */
+export function rtlsSuicideWindow(nav: Nav) {
+  const pz = nav.engineAlt;
+  const vDown = Math.max(0, -nav.v.z);
+  if (pz < 1_600) return true;
+  const sl = suicideLightAlt(nav);
+  if (sl.use3 && pz > 2_200) return false;
+  const aEng = clamp(MERLIN_THRUST_SL_N / nav.mass - G0, 4, 40);
+  const aDrag = (nav.q * REF_AREA_M2 * 0.4) / Math.max(1, nav.mass);
+  const s1 = Math.max(0, vDown * vDown - 36) / (2 * (aEng + aDrag)) + 10;
+  return pz < s1 * 1.08 && pz < 4_200;
 }
 
 export function vRef(alt: number) {
@@ -211,6 +234,66 @@ function predictedImpact(nav: Nav): { x: number; y: number; t: number } {
   return { x: px, y: py, t };
 }
 
+/** High-altitude intercept. Glide steering keeps the 16-step `predictedImpact`. */
+function predictedImpactRtls(nav: Nav): { x: number; y: number; t: number } {
+  let px = nav.p.x;
+  let py = nav.p.y;
+  let pz = nav.p.z;
+  let vx = nav.v.x;
+  let vy = nav.v.y;
+  let vz = nav.v.z;
+  const mass = Math.max(1, nav.mass);
+  const sAoa = Math.sin(Math.min(1.2, Math.abs(nav.aoa)));
+  const cdA = (0.95 + 1.55 * sAoa * sAoa) * REF_AREA_M2;
+  let t = 0;
+  for (let i = 0; i < 48; i++) {
+    if (pz < 10) break;
+    const vd = Math.max(10, -vz);
+    const dt = clamp(pz / (vd * 4), 0.4, 8);
+    const air = lookup(pz);
+    const spd = Math.hypot(vx, vy, vz);
+    const q = 0.5 * air.density * spd * spd;
+    const aDrag = (cdA * q) / mass;
+    const inv = spd > 1 ? aDrag / spd : 0;
+    vx += -vx * inv * dt;
+    vy += -vy * inv * dt;
+    vz += (-vz * inv - G0) * dt;
+    px += vx * dt;
+    py += vy * dt;
+    pz += vz * dt;
+    t += dt;
+    if (pz <= 0) {
+      const back = pz / Math.min(-1e-3, vz);
+      px -= vx * back;
+      py -= vy * back;
+      t -= back;
+      pz = 0;
+      break;
+    }
+  }
+  return { x: px, y: py, t };
+}
+
+/** RTLS-only: 3-Merlin entry until drag-aware intercept is near the pad. */
+function rtlsEntryCommand(nav: Nav): { want: boolean; still: boolean; thr: number } {
+  const reserve = SUICIDE_FUEL_KG * 0.95;
+  const fuelOk = nav.fuel > reserve;
+  const imp = predictedImpactRtls(nav);
+  const predRange = Math.hypot(imp.x, imp.y);
+  const past = nav.p.x * imp.x + nav.p.y * imp.y < 0;
+  const extra = past ? predRange : -predRange;
+  const hypersonic = nav.speed > 1_450;
+  const qHot = nav.q > 28_000 && nav.speed > 500;
+  const long = extra > 3_500;
+  const high = nav.alt > 45_000 && nav.alt < 95_000;
+  const want = fuelOk && high && (hypersonic || qHot || long);
+  const still = fuelOk && high && (hypersonic || qHot || extra > 2_000);
+  let thr = 1;
+  if (!hypersonic && extra < 14_000) thr = clamp(0.55 + extra / 22_000, 0.55, 1);
+  if (qHot && nav.q > 60_000) thr = 1;
+  return { want, still, thr };
+}
+
 function g(gains: Gains, i: number) {
   return gains[i] ?? 1;
 }
@@ -232,61 +315,45 @@ export function nominalControls(
 ): { u: Controls; desiredX: Vec3 } {
   let desiredX = new Vec3(0, 0, 1);
   const u = emptyControls();
+  const rtls = latch.energy >= 0.85;
+
+  // RTLS entry is independent of phase so a 450 m/s glide flicker cannot one-shot it.
+  if (rtls && latch.entry !== "done" && phase !== "landing") {
+    const cmd = rtlsEntryCommand(nav);
+    if (latch.entry === "on" || cmd.want) {
+      if (cmd.still) {
+        latch.entry = "on";
+        desiredX = aimRetro(nav, gains);
+        u.nEngines = N_ENGINES_ENTRY;
+        u.throttle = cmd.thr;
+        return { u, desiredX };
+      }
+      latch.entry = "done";
+    }
+  }
 
   if (phase === "exo" || phase === "entry") {
-    if (nav.v.len() > 10) desiredX = aimRetro(nav, gains);
-    const allowEntry = latch.energy >= 0.85;
-    if (allowEntry && latch.entry !== "done") {
-      const reserve = SUICIDE_FUEL_KG * 1.05;
-      const pred = predictedLandingRange(nav);
-      const closing =
-        nav.rangeH < 1 || -nav.p.x * nav.v.x + -nav.p.y * nav.v.y > 0;
-      const overshoot = closing ? pred - nav.rangeH : pred + nav.rangeH;
-      const vTarget = vRef(nav.alt);
-      const tooFast = nav.speed > vTarget + 80;
-      const qHot = nav.q > 22_000 && nav.speed > 400;
-      const long = overshoot > 6_000 && nav.speed > 500;
-      const hypersonic = nav.speed > 1_550;
-      const fuelOk = nav.fuel > reserve;
-      const wantStart = fuelOk && (hypersonic || tooFast || qHot || long) && nav.alt < 95_000;
-      const stillNeed =
-        fuelOk &&
-        nav.alt >= 11_000 &&
-        (nav.speed > vTarget + 15 || nav.q > 16_000 || nav.speed > 1_400 || overshoot > 4_000);
-      if (latch.entry === "on" || wantStart) {
-        latch.entry = "on";
-        if (stillNeed) {
-          u.nEngines = N_ENGINES_ENTRY;
-          const need = hypersonic
-            ? nav.speed - 1_400
-            : tooFast
-              ? nav.speed - vTarget
-              : qHot
-                ? nav.speed - 380
-                : overshoot / 12;
-          let thr = saturate(0.4 + (need / 500) * g(gains, 4));
-          const qG = (nav.q * 10.56) / nav.mass / G0;
-          if (qG > 6.3) thr *= clamp(9 / Math.max(1, qG), 0.4, 1);
-          u.throttle = saturate(thr);
-        } else {
-          latch.entry = "done";
-        }
-      }
-    } else if (!allowEntry) {
-      desiredX = unpoweredGlideAim(nav, gains);
+    if (rtls) {
+      desiredX = unpoweredGlideAim(nav, gains, rtls);
+      u.nEngines = 0;
+    } else if (nav.v.len() > 10) {
+      desiredX = aimRetro(nav, gains);
+      u.nEngines = 0;
+    } else {
+      desiredX = unpoweredGlideAim(nav, gains, rtls);
       u.nEngines = 0;
     }
   } else if (phase === "glide") {
-    if (latch.entry === "on") latch.entry = "done";
-    desiredX = unpoweredGlideAim(nav, gains);
+    if (!rtls && latch.entry === "on") latch.entry = "done";
+    desiredX = unpoweredGlideAim(nav, gains, rtls);
     u.nEngines = 0;
   } else {
-    if (latch.entry === "on") latch.entry = "done";
+    if (!rtls && latch.entry === "on") latch.entry = "done";
     hoverSlam(nav, u, (x) => {
       desiredX = x;
-    }, engineOn, gains, latch.landingDone);
+    }, engineOn, gains, latch.landingDone, rtls);
     if (!engineOn && hotUnpoweredCoast(nav) && u.nEngines <= 0) {
-      desiredX = unpoweredGlideAim(nav, gains);
+      desiredX = unpoweredGlideAim(nav, gains, rtls);
     }
   }
 
@@ -307,7 +374,7 @@ function landingTgo(nav: Nav) {
 }
 
 /** Unpowered high-altitude aim: tail-first, pitch toward zenith for drag, bank for miss. */
-export function unpoweredGlideAim(nav: Nav, gains: Gains = NOMINAL_GAINS): Vec3 {
+export function unpoweredGlideAim(nav: Nav, gains: Gains = NOMINAL_GAINS, rtls = false): Vec3 {
   const spd = nav.speed;
   if (spd < 12) return unpoweredLandingAim(nav);
   const vh = Math.hypot(nav.v.x, nav.v.y);
@@ -315,6 +382,9 @@ export function unpoweredGlideAim(nav: Nav, gains: Gains = NOMINAL_GAINS): Vec3 
   const steep = vDown / Math.max(spd, 1) > 0.88;
   if (nav.alt < 3_200 && spd < 190 && nav.rangeH < 2_800) return unpoweredLandingAim(nav);
   if (nav.alt < 3_800 && steep && nav.rangeH < 2_200 && spd < 220) return unpoweredLandingAim(nav);
+  if (rtls && nav.alt < 8_500 && vh < 90 && nav.rangeH > 40 && nav.rangeH < 2_200 && spd > 90) {
+    return unpoweredLandingAim(nav);
+  }
 
   const vhat = nav.v.scale(1 / spd);
   const retro = vhat.neg();
@@ -329,7 +399,13 @@ export function unpoweredGlideAim(nav: Nav, gains: Gains = NOMINAL_GAINS): Vec3 
 
   const q = nav.q;
   let aoaMax = 1.15;
-  if (q > 28_000) aoaMax = 0.36;
+  if (rtls && q > 12_000) {
+    // Stay under AoA destroy (42°) and q-alpha 2800; glide rung keeps the tighter schedule.
+    const qk = q / 1000;
+    const qAlphaMax = ((2_400 / Math.max(12, qk)) * Math.PI) / 180;
+    aoaMax = Math.min(0.62, qAlphaMax);
+    if (q > 90_000) aoaMax = Math.min(aoaMax, 0.32);
+  } else if (q > 28_000) aoaMax = 0.36;
   else if (q > 16_000) aoaMax = lerp(0.48, 0.36, (q - 16_000) / 12_000);
   else if (q > 11_500) aoaMax = lerp(0.55, 0.48, (q - 11_500) / 4_500);
   else if (q > 8_000) aoaMax = lerp(0.95, 0.55, (q - 8_000) / 3_500);
@@ -354,7 +430,7 @@ export function unpoweredGlideAim(nav: Nav, gains: Gains = NOMINAL_GAINS): Vec3 
     const lat = recede ? rHat.neg() : missH.neg();
     const latP = lat.sub(retro.scale(lat.dot(retro)));
     if (latP.len() > 0.05) {
-      const bank = clamp((recede ? range : missH.len()) / 8_000, 0.04, 0.18);
+      const bank = clamp((recede ? range : missH.len()) / (rtls ? 5_500 : 8_000), 0.04, rtls ? 0.28 : 0.18);
       steer = steer.lerp(latP.normalized(), bank);
       const sn = steer.len();
       if (sn > 0.05) steer = steer.scale(1 / sn);
@@ -403,6 +479,7 @@ function hoverSlam(
   engineOn: boolean,
   gains: Gains,
   landingDone: boolean,
+  rtls = false,
 ) {
   if (landingDone) {
     u.throttle = 0;
@@ -444,6 +521,11 @@ function hoverSlam(
   if (engineOn && overPad && pz < 70 && vDown > 6 && !climbing) {
     u.nEngines = Math.max(u.nEngines, N_ENGINES_LANDING);
     u.throttle = Math.max(u.throttle, 0.85);
+  }
+
+  if (rtls && overPad && pz < 16 && (climbing || vDown < 9)) {
+    u.throttle = 0;
+    u.nEngines = 0;
   }
 
   const thrusting = u.nEngines > 0 && u.throttle > 0.02;
@@ -491,6 +573,10 @@ function hoverSlam(
   let maxTilt = landingMaxTilt(pz, predRange, predRange > 22 || vh > 8) * g(gains, 3);
   if (!trueOvershoot && !skid) maxTilt *= killFrac;
   if (skid) maxTilt = Math.max(maxTilt, clamp(vh / 70, 0.08, 0.28));
+  if (rtls && nav.q > 8_000) maxTilt = Math.min(maxTilt, 0.12);
+  if (rtls && nav.q > 16_000) maxTilt = Math.min(maxTilt, 0.07);
+  if (rtls && pz < 480) maxTilt = Math.min(maxTilt, 0.16);
+  if (rtls && pz < 160) maxTilt = Math.min(maxTilt, 0.09);
   const enginesTowardPad =
     range > 1 && (nav.p.x * nav.bodyX.x + nav.p.y * nav.bodyX.y) / range > 0.08;
   if (enginesTowardPad && !trueOvershoot && !skid && pz < 1_200) maxTilt *= 0.5;
