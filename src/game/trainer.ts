@@ -1,4 +1,5 @@
 import { clamp, rng } from "./math";
+import { SUCCESS_PAD_OFFSET_M } from "./constants";
 import { SAVE_KEY, SAVE_VERSION, missionFromEnergy, nextEnergy, snapEnergy, type Mission } from "./scenario";
 import { Sim } from "./sim";
 import { N_WEIGHTS, zeroWeights } from "./policy";
@@ -8,6 +9,13 @@ export const ELITE = 3;
 export const TRAIL_MAX = 280;
 export const GATE_RATE = 0.4;
 export const GATE_NEED = 2;
+
+/** Floor for any legal land. Still far above the best miss (~-300). */
+export const LAND_BASE = 6_000;
+/** Earned only at range=0; falls as (1 - r/pad)² so the rim is almost 0. */
+export const LAND_BULLSEYE = 6_000;
+/** Extra quadratic punch inside the 20 m success circle. 19 m ≈ 4.3k. */
+export const LAND_RANGE_QUAD = 12;
 
 export type Brain = {
   version: number;
@@ -84,11 +92,26 @@ export type Agent = {
   trailCursor: number;
 };
 
-/** Honest score: a land always beats a miss. */
+/** Pad quality in [0, 1]: 1 on the mark, 0 at the 20 m land rim. */
+export function padBullseye(rangeH: number) {
+  const frac = clamp(1 - rangeH / SUCCESS_PAD_OFFSET_M, 0, 1);
+  return frac * frac;
+}
+
+/** Honest score: any land beats any miss. Closer / slower / more upright lands win. */
 export function scoreSim(sim: Sim): number {
   const n = sim.nav;
   if (sim.term === "landed") {
-    return 12_000 + n.fuel * 0.08 - sim.t * 2 - n.speed * 40 - n.rangeH * 8;
+    const tiltDeg = (n.tilt * 180) / Math.PI;
+    return (
+      LAND_BASE +
+      LAND_BULLSEYE * padBullseye(n.rangeH) -
+      LAND_RANGE_QUAD * n.rangeH * n.rangeH -
+      n.speed * 40 -
+      tiltDeg * 30 +
+      n.fuel * 0.08 -
+      sim.t * 2
+    );
   }
   const range = n.rangeH;
   const speed = n.speed;

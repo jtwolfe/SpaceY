@@ -4,6 +4,8 @@ TypeScript rewrite of the Falcon 9–class RTLS trainer. A 14→8→8→10 tanh 
 
 Training is a gated ladder: **Pad → 2 km → Glide → RTLS**. Two consecutive generations at ≥40% land unlock the next rung. No auto-drop.
 
+A legal land is a 6k floor plus a 6k squared bullseye that collapses toward the 20 m rim, with an extra quadratic range tax. Touching down still dwarfs every miss; landing on the mark outranks a rim land by thousands of points.
+
 This branch is the Grok in-browser gym (not the Rust/WASM tree on `main` / `rework/full-rtls`).
 
 ```
