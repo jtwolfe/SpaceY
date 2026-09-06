@@ -2,13 +2,18 @@ import { lookup } from "./atmosphere";
 import {
   DT,
   DRY_MASS_KG,
+  COAST_ALT_M,
   FIN_SLEW_RAD_S,
   G0,
   GIMBAL_SLEW_RAD_S,
   IMPACT_SPEED_MPS,
   IMPACT_TILT_RAD,
   inertiaDiag,
+  POLICY_DT,
   REF_AREA_M2,
+  SUCCESS_PAD_OFFSET_M,
+  THROTTLE_MIN,
+  GEAR_ENGINE_ALT_M,
   wetMass,
 } from "./constants";
 import {
@@ -19,17 +24,21 @@ import {
   groundHit,
   makeNav,
   nominalControls,
+  suicideLightAlt,
   success,
+  type BurnLatch,
   type Controls,
+  type EntryBurn,
   type Gains,
   type Nav,
   type Phase,
   type TermReason,
   NOMINAL_GAINS,
 } from "./guidance";
-import { applyResidual, mlpForward, observe, N_HIDDEN, N_HIDDEN_LAYERS, N_OUT } from "./policy";
+import { applyResidual, keepSinking, mlpForward, observe, N_HIDDEN, N_HIDDEN_LAYERS, N_OUT } from "./policy";
 import { Quat, slew, Vec3 } from "./math";
-import { spawnAt, type Spawn } from "./scenario";
+import { spawnAt, missionFromEnergy, type Spawn } from "./scenario";
+import { ballisticMissRange, goalFromState, goalToRefObs, planRef, type GoalCmd, type RefTraj } from "./reftraj";
 import {
   aero,
   checkDestruction,
@@ -96,6 +105,33 @@ export class Sim {
     fire: false,
   };
   seed = 1;
+  minRange = 1e9;
+  climbT = 0;
+  entryBurn: EntryBurn = "idle";
+  landingIgnited = false;
+  landingDone = false;
+  landingLightAlt = 0;
+  landingSLight = 0;
+  engineOnT = 0;
+  thrustAwayShortT = 0;
+  threeOnT = 0;
+  threeMinT = 0;
+  ref: RefTraj | null = null;
+  goal: GoalCmd | null = null;
+  goalT = -1;
+  lastRefDist = 0;
+  wobbleT = 0;
+  spawnRange = 0;
+  coastLatched = false;
+  coastKill = 0;
+  coastRemain = 0;
+  coastVh = 0;
+  coastLingerT = 0;
+  lateTiltT = 0;
+  lateVhT = 0;
+  spawnPredMiss = 0;
+  coastPredRemain = 0;
+  coastPredKill = 0;
 
   static fromSpawn(spawn: Spawn, opts?: { destroy?: boolean; pilot?: Pilot; gains?: Gains; seed?: number; weights?: number[] }) {
     const s = new Sim();
@@ -113,7 +149,44 @@ export class Sim {
     s.weights = opts?.weights ? [...opts.weights] : null;
     s.seed = opts?.seed ?? 1;
     s.windDir = (s.seed % 360) * (Math.PI / 180);
+    s.minRange = Math.hypot(s.p.x, s.p.y);
+    s.climbT = 0;
+    s.entryBurn = "idle";
+    s.landingIgnited = false;
+    s.landingDone = false;
+    s.landingLightAlt = 0;
+    s.landingSLight = 0;
+    s.engineOnT = 0;
+    s.thrustAwayShortT = 0;
+    s.threeOnT = 0;
+    s.threeMinT = 0;
+    s.ref = missionFromEnergy(s.energy) === "slam"
+      ? planRef({
+          p: s.p,
+          v: s.v,
+          fuel: s.fuel,
+          timeout: s.timeout,
+          windScale: s.windScale,
+          windDir: s.windDir,
+        })
+      : null;
+    s.lastRefDist = 0;
+    s.goal = null;
+    s.goalT = -1;
+    s.wobbleT = 0;
+    s.spawnRange = Math.hypot(s.p.x, s.p.y);
+    s.coastLatched = false;
+    s.coastKill = 0;
+    s.coastRemain = s.spawnRange;
+    s.coastVh = Math.hypot(s.v.x, s.v.y);
+    s.coastLingerT = 0;
+    s.lateTiltT = 0;
+    s.lateVhT = 0;
+    s.spawnPredMiss = ballisticMissRange(s.p, s.v);
+    s.coastPredRemain = s.spawnPredMiss;
+    s.coastPredKill = 0;
     s.refreshNav();
+    if (s.nav.engineAlt <= COAST_ALT_M) s.latchCoast();
     return s;
   }
 
@@ -137,6 +210,8 @@ export class Sim {
 
   refreshNav() {
     const mass = Math.max(DRY_MASS_KG, wetMass(this.fuel));
+    const wSpeed = 14 * this.windScale * Math.min(1, this.p.z / 800);
+    const wind = new Vec3(Math.cos(this.windDir) * wSpeed, Math.sin(this.windDir) * wSpeed, 0);
     this.nav = makeNav(
       this.p,
       this.v,
@@ -146,7 +221,38 @@ export class Sim {
       this.lastMach,
       this.fuel,
       mass,
+      wind,
     );
+  }
+
+  refreshGoal() {
+    const lit = this.landingIgnited || this.engine.on;
+    if (this.goal && this.t - this.goalT < POLICY_DT) return this.goal;
+    this.goal = goalFromState({
+      p: this.p,
+      v: this.v,
+      fuel: this.fuel,
+      lit,
+      prev: this.goal,
+    });
+    this.goalT = this.t;
+    this.lastRefDist = Math.hypot(this.goal.predMiss.x, this.goal.predMiss.y);
+    return this.goal;
+  }
+
+  latchCoast() {
+    if (this.coastLatched) return;
+    this.coastLatched = true;
+    this.coastRemain = this.nav.rangeH;
+    this.coastVh = Math.hypot(this.v.x, this.v.y);
+    this.coastKill = Math.max(0, this.spawnRange - this.coastRemain);
+    this.coastPredRemain = ballisticMissRange(this.p, this.v);
+    this.coastPredKill = Math.max(0, this.spawnPredMiss - this.coastPredRemain);
+  }
+
+  refObs() {
+    const g = this.refreshGoal();
+    return goalToRefObs(g, this.p);
   }
 
   step(dt = DT) {
@@ -160,12 +266,14 @@ export class Sim {
     const vRelBody = this.q.conjugate().rotate(this.v.sub(vWind));
 
     this.refreshNav();
+    this.refreshGoal();
     if (!this.landingLatched && this.nav.rangeH < 8_000) {
       const vDown = Math.max(0, -this.nav.v.z);
       if (this.nav.engineAlt < 2_400 && vDown > 8) this.landingLatched = true;
       if (this.nav.engineAlt < 400) this.landingLatched = true;
     }
     this.phase = classifyPhase(this.nav, this.landingLatched);
+    if (this.phase === "landing" && this.entryBurn === "on") this.entryBurn = "done";
 
     const bx = this.bodyX();
     const by = this.bodyY();
@@ -176,7 +284,13 @@ export class Sim {
     if (this.pilot === "manual") {
       ({ u, desiredX } = this.manualControls(bx));
     } else {
-      const nom = nominalControls(this.nav, this.phase, this.engine.on, this.gains);
+      const latch: BurnLatch = {
+        energy: this.energy,
+        entry: this.entryBurn,
+        landingDone: this.landingDone,
+      };
+      const nom = nominalControls(this.nav, this.phase, this.engine.on, this.gains, latch);
+      this.entryBurn = latch.entry;
       u = nom.u;
       desiredX = nom.desiredX;
       const att = attitudeCommand(bx, by, bz, this.omega, desiredX, this.phase, this.lastQ, this.gains);
@@ -186,16 +300,48 @@ export class Sim {
       u.finYaw = att.finY;
       u.finRoll = att.finR;
       if (this.weights && this.weights.length) {
-        const o = mlpForward(this.weights, observe(this.nav, by, this.omega));
+        const o = mlpForward(this.weights, observe(this.nav, by, this.omega, this.refObs()));
         this.lastY = Array.from(o.y);
-        this.lastHidden = [...Array.from(o.h1), ...Array.from(o.h2)];
+        this.lastHidden = Array.from(o.h);
         applyResidual(u, o.y);
+        keepSinking(u, this.nav);
+      }
+      if (this.landingDone) {
+        u.throttle = 0;
+        u.nEngines = 0;
+      }
+    }
+
+    if (this.landingIgnited && !this.landingDone && this.nav.engineAlt > GEAR_ENGINE_ALT_M) {
+      if (u.nEngines <= 0 || u.throttle <= 0.02) {
+        u.nEngines = Math.max(1, u.nEngines);
+        u.throttle = Math.max(THROTTLE_MIN, u.throttle);
       }
     }
 
     const gated = this.engine.apply(this.t, u.throttle, u.nEngines);
     u.throttle = gated.throttle;
     u.nEngines = gated.n;
+    if (this.phase === "landing" && gated.n > 0) {
+      if (!this.landingIgnited) {
+        this.landingLightAlt = this.nav.engineAlt;
+        this.landingSLight = suicideLightAlt(this.nav, this.gains).sLight;
+      }
+      this.landingIgnited = true;
+    }
+    if (this.landingIgnited && gated.n === 0) this.landingDone = true;
+    if (this.phase === "landing" && gated.n > 0) {
+      this.engineOnT += dt;
+      if (gated.n >= 3) {
+        this.threeOnT += dt;
+        if (gated.throttle <= THROTTLE_MIN + 0.03) this.threeMinT += dt;
+      }
+      if (this.nav.rangeH > SUCCESS_PAD_OFFSET_M) {
+        const r = this.nav.rangeH;
+        const padDot = (-this.nav.p.x * bx.x + -this.nav.p.y * bx.y) / r;
+        if (padDot > 0) this.thrustAwayShortT += padDot * dt;
+      }
+    }
     u.gimbalY = slew(this.lastGimbal[0], u.gimbalY, GIMBAL_SLEW_RAD_S, dt);
     u.gimbalZ = slew(this.lastGimbal[1], u.gimbalZ, GIMBAL_SLEW_RAD_S, dt);
     u.finPitch = slew(this.lastFins[0], u.finPitch, FIN_SLEW_RAD_S, dt);
@@ -259,16 +405,35 @@ export class Sim {
     this.t += dt;
 
     this.refreshNav();
+    this.minRange = Math.min(this.minRange, this.nav.rangeH);
+    this.wobbleT += this.omega.len() * dt;
+    if (this.nav.engineAlt < 3_000 && this.v.z > 0.8) this.climbT += dt;
+    const vh = Math.hypot(this.v.x, this.v.y);
+    const pz = this.nav.engineAlt;
+    const lit = this.landingIgnited || this.engine.on;
+    if (!this.coastLatched) {
+      this.coastPredRemain = ballisticMissRange(this.p, this.v);
+      this.coastPredKill = Math.max(0, this.spawnPredMiss - this.coastPredRemain);
+      if (!lit && pz > COAST_ALT_M) this.coastLingerT += this.nav.rangeH * vh * dt;
+      if (lit || pz <= COAST_ALT_M) this.latchCoast();
+    }
+    if (pz < COAST_ALT_M && pz > 0) {
+      const inv = 1 / Math.max(pz, 12);
+      this.lateTiltT += ((this.nav.tilt * 180) / Math.PI) * inv * dt;
+      this.lateVhT += vh * inv * dt;
+    }
 
     const dest = checkDestruction(this.lastQ, this.lastAoa, this.lastAccelG, this.omega.len(), this.destroyEnabled);
     if (dest !== "none") {
       this.intact = false;
       this.destroyReason = dest;
+      this.latchCoast();
       this.term = "destroyed";
       return;
     }
 
     if (groundHit(this.nav)) {
+      this.latchCoast();
       if (success(this.nav, this.intact)) {
         this.term = "landed";
       } else if (
@@ -287,10 +452,14 @@ export class Sim {
     }
 
     if (fuelInfeasible(this.nav, this.phase)) {
+      this.latchCoast();
       this.term = "fuel";
       return;
     }
-    if (this.t > this.timeout) this.term = "timeout";
+    if (this.t > this.timeout) {
+      this.latchCoast();
+      this.term = "timeout";
+    }
   }
 
   stepFor(seconds: number) {

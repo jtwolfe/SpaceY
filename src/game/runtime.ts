@@ -112,6 +112,11 @@ export function createRuntime(canvas: HTMLCanvasElement, hooks: RuntimeHooks) {
       cam: [scene.camera.position.x, scene.camera.position.y, scene.camera.position.z],
       rocket: [scene.rocket.position.x, scene.rocket.position.y, scene.rocket.position.z],
       dist: scene.camera.position.distanceTo(scene.rocket.position),
+      range: Math.hypot(viewed().p.x, viewed().p.y),
+      east: viewed().p.x,
+      north: viewed().p.y,
+      alt: viewed().p.z,
+      energy: viewed().energy,
     }),
     getGym: () => trainer.snap(watch),
     getBrain: () => trainer.brain,
@@ -222,14 +227,17 @@ export function createRuntime(canvas: HTMLCanvasElement, hooks: RuntimeHooks) {
           const elite = trainer.finishGen();
           const unlocked = trainer.unlocked;
           const stage = missionLabel(trainer.brain.energy);
+          const grown = trainer.grown;
           hooks.onNote(
             unlocked
               ? `Unlocked ${missionLabel(trainer.brain.energy)} · gen ${trainer.brain.gen}`
-              : `Gen ${trainer.brain.gen} · ${stage} · land ${(trainer.brain.landRate * 100).toFixed(0)}% · σ ${trainer.brain.sigma.toFixed(2)} · ${elite?.term ?? ""}`,
+              : grown
+                ? `Grew ${grown} · gen ${trainer.brain.gen}`
+                : `Gen ${trainer.brain.gen} · ${stage} · land ${(trainer.brain.landRate * 100).toFixed(0)}% · σ ${trainer.brain.sigma.toFixed(2)} · ${elite?.term ?? ""}`,
           );
           hooks.onBrain(trainer.brain);
           trainer.beginGen();
-          if (trainer.brain.energy !== prevE) recycleWatch(true);
+          if (trainer.brain.energy !== prevE || grown) recycleWatch(true);
         }
       }
     } else if (!train && !soloPaused()) {

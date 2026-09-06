@@ -1,5 +1,7 @@
 import * as THREE from "three";
 import { STAGE_LENGTH_M, STAGE_DIAMETER_M } from "./constants";
+import { POP } from "./trainer";
+import { makeWorld } from "./world";
 import type { Sim } from "./sim";
 import type { CamMode } from "./store";
 
@@ -7,9 +9,9 @@ const STEEL = 0xb7bec8;
 const WHITE = 0xf4f6f8;
 const CHAR = 0x16181d;
 const BELL = 0x4a3c32;
-const PAD = 0x5a5e66;
-const OCEAN = 0x0d1c26;
 const FLAME = 0xffc48a;
+const ZOOM_MIN = 0.15;
+const ZOOM_MAX = 64;
 
 function enuToThree(x: number, y: number, z: number, out: THREE.Vector3) {
   return out.set(x, z, -y);
@@ -41,6 +43,8 @@ export class SpaceyScene {
   swarmMesh: THREE.InstancedMesh;
   swarmDummy = new THREE.Object3D();
   swarmColor = new THREE.Color();
+  nadir: THREE.Mesh;
+  swarmNadir: THREE.InstancedMesh;
   wide = false;
   unbindNav: (() => void) | null = null;
   tmp = new THREE.Vector3();
@@ -61,32 +65,30 @@ export class SpaceyScene {
       antialias: true,
       alpha: false,
       powerPreference: "high-performance",
+      logarithmicDepthBuffer: true,
     });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    this.renderer.setClearColor(0x0c141c, 1);
+    this.renderer.setClearColor(0x02040a, 1);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.18;
+    this.renderer.toneMappingExposure = 1.12;
 
     this.scene = new THREE.Scene();
-    this.scene.fog = new THREE.FogExp2(0x0c141c, 0.000008);
 
-    this.camera = new THREE.PerspectiveCamera(48, 1, 0.4, 180_000);
+    this.camera = new THREE.PerspectiveCamera(48, 1, 0.8, 2.6e7);
     this.camera.position.set(24, 90, 36);
 
-    this.scene.add(new THREE.HemisphereLight(0xc5d2e0, 0x2a322c, 1.05));
-    const sun = new THREE.DirectionalLight(0xfff6ea, 2.15);
-    sun.position.set(-500, 900, 420);
-    this.scene.add(sun);
-    const rim = new THREE.DirectionalLight(0x7e9bb8, 0.55);
-    rim.position.set(300, 80, -500);
-    this.scene.add(rim);
+    this.scene.add(new THREE.HemisphereLight(0x8aa7c4, 0x0c1410, 0.42));
+    const world = makeWorld();
+    this.scene.add(world.group);
+    this.pad = world.pad;
 
-    this.scene.add(makeSky());
-    this.scene.add(makeStars());
-    this.scene.add(makeOcean());
-    this.pad = makePad();
-    this.scene.add(this.pad);
+    const sun = new THREE.DirectionalLight(0xfff1dc, 2.35);
+    sun.position.copy(world.sunDir).multiplyScalar(4.5e6);
+    this.scene.add(sun);
+    const bounce = new THREE.DirectionalLight(0x4a6a88, 0.28);
+    bounce.position.set(800, 120, 200);
+    this.scene.add(bounce);
 
     this.rocket = makeRocket();
     this.scene.add(this.rocket);
@@ -108,7 +110,7 @@ export class SpaceyScene {
     );
     this.scene.add(this.trail);
 
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < POP; i++) {
       const buf = new Float32Array(280 * 3);
       this.swarmPos.push(buf);
       const geo = new THREE.BufferGeometry();
@@ -129,13 +131,44 @@ export class SpaceyScene {
 
     const needle = new THREE.CylinderGeometry(1.2, 1.8, 32, 7);
     const needleMat = new THREE.MeshBasicMaterial({ color: 0xd5dee8, transparent: true, opacity: 0.55 });
-    this.swarmMesh = new THREE.InstancedMesh(needle, needleMat, 12);
+    this.swarmMesh = new THREE.InstancedMesh(needle, needleMat, POP);
     this.swarmMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.swarmMesh.frustumCulled = false;
     this.swarmMesh.visible = false;
-    for (let i = 0; i < 12; i++) this.swarmMesh.setColorAt(i, this.swarmColor.setHex(STEEL));
+    for (let i = 0; i < POP; i++) this.swarmMesh.setColorAt(i, this.swarmColor.setHex(STEEL));
     if (this.swarmMesh.instanceColor) this.swarmMesh.instanceColor.needsUpdate = true;
     this.scene.add(this.swarmMesh);
+
+    this.nadir = new THREE.Mesh(
+      new THREE.RingGeometry(2.4, 4.1, 28),
+      new THREE.MeshBasicMaterial({
+        color: 0xe8dcc0,
+        transparent: true,
+        opacity: 0.92,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      }),
+    );
+    this.nadir.rotation.x = -Math.PI / 2;
+    this.nadir.position.y = 1.55;
+    this.scene.add(this.nadir);
+
+    const nadirDisk = new THREE.CircleGeometry(2.2, 14);
+    nadirDisk.rotateX(-Math.PI / 2);
+    this.swarmNadir = new THREE.InstancedMesh(
+      nadirDisk,
+      new THREE.MeshBasicMaterial({
+        color: 0x8aa0b8,
+        transparent: true,
+        opacity: 0.55,
+        depthWrite: false,
+      }),
+      POP,
+    );
+    this.swarmNadir.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.swarmNadir.frustumCulled = false;
+    this.swarmNadir.visible = false;
+    this.scene.add(this.swarmNadir);
 
     this.fit(canvas);
     this.resizeObs = new ResizeObserver(() => this.fit(canvas));
@@ -186,6 +219,9 @@ export class SpaceyScene {
     (this.trail.geometry.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
     this.trail.geometry.setDrawRange(0, Math.min(600, this.trailIdx));
 
+    this.nadir.position.set(this.tmp.x, 1.55, this.tmp.z);
+    this.nadir.visible = true;
+
     this.updateCam(cam, dt);
   }
 
@@ -207,6 +243,7 @@ export class SpaceyScene {
   ) {
     this.wide = false;
     this.swarmMesh.visible = on;
+    this.swarmNadir.visible = on;
     for (let i = 0; i < this.swarm.length; i++) {
       const line = this.swarm[i];
       const item = items[i];
@@ -252,15 +289,25 @@ export class SpaceyScene {
       else if (item.dead) this.swarmColor.setHex(0xe09086);
       else this.swarmColor.setHex(0xc5d2e0);
       this.swarmMesh.setColorAt(i, this.swarmColor);
+
+      this.swarmDummy.position.set(item.px, 1.5, -item.py);
+      this.swarmDummy.quaternion.identity();
+      this.swarmDummy.scale.setScalar(item.landed || item.dead ? 0.7 : 1);
+      this.swarmDummy.updateMatrix();
+      this.swarmNadir.setMatrixAt(i, this.swarmDummy.matrix);
     }
+    const drawn = on ? Math.min(items.length, POP) : 0;
+    this.swarmMesh.count = drawn;
+    this.swarmNadir.count = drawn;
     this.swarmMesh.instanceMatrix.needsUpdate = true;
+    this.swarmNadir.instanceMatrix.needsUpdate = true;
     if (this.swarmMesh.instanceColor) this.swarmMesh.instanceColor.needsUpdate = true;
   }
 
   look(dyaw: number, dpitch: number, zoomMul = 1) {
     this.yaw += dyaw;
     this.pitch = Math.min(1.35, Math.max(-0.28, this.pitch + dpitch));
-    this.zoom = Math.min(10, Math.max(0.18, this.zoom * zoomMul));
+    this.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, this.zoom * zoomMul));
     this.firstCam = true;
   }
 
@@ -308,7 +355,7 @@ export class SpaceyScene {
       if (pts.size >= 2) {
         const arr = [...pts.values()];
         const d = Math.hypot(arr[0].x - arr[1].x, arr[0].y - arr[1].y) || 1;
-        if (pinch0 > 0) this.zoom = Math.min(10, Math.max(0.18, this.zoom * (pinch0 / d)));
+        if (pinch0 > 0) this.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, this.zoom * (pinch0 / d)));
         pinch0 = d;
         return;
       }
@@ -333,7 +380,7 @@ export class SpaceyScene {
     const onWheel = (e: WheelEvent) => {
       if (isUi(e.target)) return;
       e.preventDefault();
-      this.zoom = Math.min(10, Math.max(0.18, this.zoom * Math.exp(e.deltaY * 0.00135)));
+      this.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, this.zoom * Math.exp(e.deltaY * 0.00135)));
     };
     const onDbl = (e: MouseEvent) => {
       if (isUi(e.target)) return;
@@ -360,8 +407,17 @@ export class SpaceyScene {
     if (cam === "orbit" && !this.dragging) this.yaw += dt * 0.08;
     if (cam === "orbit") {
       this.camTarget.copy(pos);
+      if (pos.y > 12_000) {
+        this.camTarget.y = pos.y * 0.42;
+        this.camTarget.x = pos.x * 0.55;
+        this.camTarget.z = pos.z * 0.55;
+      }
     } else if (cam === "pad") {
-      this.camTarget.set(pos.x * 0.22, Math.max(8, pos.y * 0.32), pos.z * 0.22);
+      if (pos.y > 400) {
+        this.camTarget.set(0, 6, 0);
+      } else {
+        this.camTarget.set(pos.x * 0.22, Math.max(8, pos.y * 0.32), pos.z * 0.22);
+      }
     } else if (pos.y < 140) {
       this.camTarget.set(pos.x * 0.12, pos.y * 0.38, pos.z * 0.12);
     } else {
@@ -377,17 +433,22 @@ export class SpaceyScene {
     let dist: number;
     let lift: number;
     if (cam === "orbit") {
-      dist = (160 + Math.hypot(this.lookAt.x, this.lookAt.z) * 0.28 + alt * 0.28) * this.zoom;
-      lift = dist * 0.1;
+      dist = (160 + Math.hypot(this.lookAt.x, this.lookAt.z) * 0.28 + Math.max(alt, pos.y) * 0.42) * this.zoom;
+      lift = dist * 0.16;
     } else if (cam === "pad") {
-      dist = 140 * this.zoom;
-      lift = 24;
+      if (pos.y > 400) {
+        dist = Math.min(320 + pos.y * 0.04, 2_400) * this.zoom;
+        lift = 110;
+      } else {
+        dist = 140 * this.zoom;
+        lift = 24;
+      }
     } else if (alt < 140) {
       dist = 92 * this.zoom;
       lift = 16;
     } else {
-      dist = 48 * this.zoom;
-      lift = 10;
+      dist = (48 + Math.min(pos.y, 80_000) * 0.012) * this.zoom;
+      lift = 10 + Math.min(pos.y, 40_000) * 0.004;
     }
     dist = Math.max(16, dist);
     const cp = this.pitch;
@@ -572,113 +633,4 @@ function makeRocket() {
     }
   });
   return g;
-}
-
-function makePad() {
-  const g = new THREE.Group();
-  const mat = new THREE.MeshStandardMaterial({
-    color: PAD,
-    metalness: 0.28,
-    roughness: 0.58,
-    emissive: 0x151820,
-    emissiveIntensity: 0.2,
-  });
-  const deck = new THREE.Mesh(new THREE.CylinderGeometry(32, 32, 1.4, 8), mat);
-  deck.position.y = 0.7;
-  g.add(deck);
-  const ring = new THREE.Mesh(
-    new THREE.RingGeometry(20, 30, 8),
-    new THREE.MeshBasicMaterial({ color: 0xd0d6de, side: THREE.DoubleSide }),
-  );
-  ring.rotation.x = -Math.PI / 2;
-  ring.position.y = 1.42;
-  g.add(ring);
-  const mark = new THREE.Mesh(
-    new THREE.CircleGeometry(5.2, 24),
-    new THREE.MeshBasicMaterial({ color: 0x07080c }),
-  );
-  mark.rotation.x = -Math.PI / 2;
-  mark.position.y = 1.43;
-  g.add(mark);
-  const xMat = new THREE.MeshBasicMaterial({ color: 0xe8eaed });
-  for (const rot of [0.6, -0.6]) {
-    const bar = new THREE.Mesh(new THREE.BoxGeometry(11, 0.1, 0.85), xMat);
-    bar.position.y = 1.48;
-    bar.rotation.y = rot;
-    g.add(bar);
-  }
-  for (let i = 0; i < 4; i++) {
-    const p = new THREE.Mesh(new THREE.BoxGeometry(2.4, 7, 1.5), mat);
-    const a = i * (Math.PI / 2) + Math.PI / 4;
-    p.position.set(Math.cos(a) * 40, 3.5, Math.sin(a) * 40);
-    g.add(p);
-    const lamp = new THREE.Mesh(
-      new THREE.BoxGeometry(0.6, 0.6, 0.6),
-      new THREE.MeshBasicMaterial({ color: 0xe8dcc0 }),
-    );
-    lamp.position.set(Math.cos(a) * 40, 7.2, Math.sin(a) * 40);
-    g.add(lamp);
-    const light = new THREE.PointLight(0xffe6c0, 18, 90, 2);
-    light.position.set(Math.cos(a) * 38, 8, Math.sin(a) * 38);
-    g.add(light);
-  }
-  return g;
-}
-
-function makeOcean() {
-  const g = new THREE.Group();
-  const water = new THREE.Mesh(
-    new THREE.CircleGeometry(60_000, 64),
-    new THREE.MeshStandardMaterial({ color: OCEAN, metalness: 0.32, roughness: 0.58 }),
-  );
-  water.rotation.x = -Math.PI / 2;
-  water.position.y = -0.4;
-  g.add(water);
-  const land = new THREE.Mesh(
-    new THREE.CircleGeometry(520, 36),
-    new THREE.MeshStandardMaterial({ color: 0x323c30, roughness: 0.92, metalness: 0.02 }),
-  );
-  land.rotation.x = -Math.PI / 2;
-  land.position.y = -0.18;
-  g.add(land);
-  return g;
-}
-
-function makeSky() {
-  const geo = new THREE.SphereGeometry(80_000, 32, 20);
-  const col = geo.attributes.position;
-  const colors = new Float32Array(col.count * 3);
-  const cTop = new THREE.Color(0x070b10);
-  const cHor = new THREE.Color(0x243242);
-  const cBot = new THREE.Color(0x101820);
-  for (let i = 0; i < col.count; i++) {
-    const y = col.getY(i) / 80_000;
-    const t = THREE.MathUtils.clamp(y * 0.5 + 0.5, 0, 1);
-    const c = t < 0.48 ? cBot.clone().lerp(cHor, t / 0.48) : cHor.clone().lerp(cTop, (t - 0.48) / 0.52);
-    colors[i * 3] = c.r;
-    colors[i * 3 + 1] = c.g;
-    colors[i * 3 + 2] = c.b;
-  }
-  geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-  const mat = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide, depthWrite: false, fog: false });
-  return new THREE.Mesh(geo, mat);
-}
-
-function makeStars() {
-  const n = 1400;
-  const pos = new Float32Array(n * 3);
-  for (let i = 0; i < n; i++) {
-    const r = 70_000;
-    const a = Math.random() * Math.PI * 2;
-    const b = Math.acos(2 * Math.random() - 1);
-    pos[i * 3] = r * Math.sin(b) * Math.cos(a);
-    pos[i * 3 + 1] = Math.abs(r * Math.cos(b));
-    pos[i * 3 + 2] = r * Math.sin(b) * Math.sin(a);
-  }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-  return new THREE.Points(
-    geo,
-    new THREE.PointsMaterial({ color: 0xe8eef4, size: 90, sizeAttenuation: true, depthWrite: false }),
-  );
 }

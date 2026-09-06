@@ -41,7 +41,7 @@ type State = {
   gym: GymSnap | null;
   genNote: string;
   seed: number;
-  start: (pilot?: AppPilot) => void;
+  start: (pilot?: AppPilot, mission?: Mission) => void;
   setPilot: (p: AppPilot) => void;
   setMission: (m: Mission) => void;
   setCam: (c: CamMode) => void;
@@ -79,7 +79,7 @@ export const useSpacey = create<State>((set, get) => ({
   gym: null,
   genNote: "",
   seed: 42,
-  start: (pilot) => {
+  start: (pilot, mission) => {
     const p = pilot ?? get().pilot;
     if (p === "train") {
       set({
@@ -89,7 +89,15 @@ export const useSpacey = create<State>((set, get) => ({
         mission: missionFromEnergy(get().brain.energy),
       });
     } else if (p === "autopilot") {
-      set({ started: true, paused: false, pilot: p, mission: "pad", warp: 1 });
+      const m = mission ?? "pad";
+      set({
+        started: true,
+        paused: false,
+        pilot: p,
+        mission: m,
+        warp: 1,
+        cam: m === "slam" ? "pad" : get().cam,
+      });
     } else {
       set({ started: true, paused: false, pilot: p });
     }
@@ -117,7 +125,7 @@ export const useSpacey = create<State>((set, get) => ({
     set({
       brain,
       gym: null,
-      genNote: "Net reset to zeros. Gate starts at Pad.",
+      genNote: "Net reset to zeros. 21→8→10 · sep-CMA · gate starts at Pad.",
       seed: get().seed + 1,
       brainEpoch: get().brainEpoch + 1,
       mission: "pad",

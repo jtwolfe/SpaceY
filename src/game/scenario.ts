@@ -4,7 +4,7 @@ import {
   START_FUEL_KG,
   SUICIDE_FUEL_KG,
 } from "./constants";
-import { lerp, Quat, rng, Vec3 } from "./math";
+import { clamp, lerp, Quat, rng, Vec3 } from "./math";
 
 export type Envelope = {
   energy: number;
@@ -44,12 +44,12 @@ const KNOTS: Knot[] = [
     ve: 28,
     vn: 0,
     vu: -120,
-    east: 160,
+    east: 0,
     north: 0,
     fuel: SUICIDE_FUEL_KG,
     tilt: 0,
     tailFirst: false,
-    wind: 0.25,
+    wind: 0.95,
     timeout: 90,
   },
   {
@@ -71,7 +71,7 @@ const KNOTS: Knot[] = [
     alt: 20_500,
     ve: -365,
     vn: 8,
-    vu: -62,
+    vu: -125,
     east: 11_000,
     north: 200,
     fuel: GLIDE_FUEL_KG,
@@ -176,6 +176,11 @@ export function nextEnergy(energy: number): number | null {
   return null;
 }
 
+/** Allowed Merlin lights this rung. Pad/2 km/glide: landing only. RTLS spawn: entry + landing. */
+export function lightBudget(energy: number): number {
+  return missionFromEnergy(energy) === "rtls" ? 2 : 1;
+}
+
 export function missionLabel(energy: number) {
   switch (missionFromEnergy(energy)) {
     case "pad":
@@ -188,6 +193,10 @@ export function missionLabel(energy: number) {
       return "RTLS";
   }
 }
+
+/** 2 km hop: uniform in a 200 m diameter annulus around LZ-1 (not the bullseye). */
+export const SLAM_SPAWN_RADIUS_M = 100;
+export const SLAM_SPAWN_MIN_R_M = 35;
 
 export type Spawn = {
   p: Vec3;
@@ -204,18 +213,39 @@ export function spawnAt(energy: number, seed: number): Spawn {
   const env = envelopeAt(energy);
   const rand = rng(seed);
   const jitter = (amp: number) => amp * (rand() * 2 - 1);
+  const slam = missionFromEnergy(energy) === "slam";
 
-  const p = new Vec3(
-    env.east + jitter(Math.min(80, env.east * 0.04 + 6)),
-    env.north + jitter(Math.min(80, Math.abs(env.north) * 0.2 + 4)),
-    env.alt + jitter(env.alt * 0.02 + 4),
-  );
-  const signE = rand() > 0.5 || env.east < 400 ? 1 : rand() > 0.5 ? 1 : -1;
-  const v = new Vec3(
-    env.ve * (env.east > 400 ? 1 : signE) + jitter(Math.abs(env.ve) * 0.08 + 1.2),
-    env.vn + jitter(Math.abs(env.vn) * 0.2 + 0.8),
-    env.vu + jitter(Math.abs(env.vu) * 0.08 + 1),
-  );
+  let p: Vec3;
+  let v: Vec3;
+  if (slam) {
+    const az = rand() * Math.PI * 2;
+    const span = SLAM_SPAWN_RADIUS_M - SLAM_SPAWN_MIN_R_M;
+    const r = SLAM_SPAWN_MIN_R_M + span * Math.sqrt(rand());
+    p = new Vec3(
+      r * Math.cos(az),
+      r * Math.sin(az),
+      env.alt + jitter(env.alt * 0.02 + 4),
+    );
+    const vaz = Math.atan2(-p.y, -p.x) + (rand() * 2 - 1) * 0.9;
+    const vh = Math.hypot(env.ve, env.vn);
+    v = new Vec3(
+      vh * Math.cos(vaz) + jitter(Math.abs(env.ve) * 0.08 + 1.2),
+      vh * Math.sin(vaz) + jitter(0.8),
+      env.vu + jitter(Math.abs(env.vu) * 0.08 + 1),
+    );
+  } else {
+    p = new Vec3(
+      env.east + jitter(Math.min(80, env.east * 0.04 + 6)),
+      env.north + jitter(Math.min(80, Math.abs(env.north) * 0.2 + 4)),
+      env.alt + jitter(env.alt * 0.02 + 4),
+    );
+    const signE = rand() > 0.5 || env.east < 400 ? 1 : rand() > 0.5 ? 1 : -1;
+    v = new Vec3(
+      env.ve * (env.east > 400 ? 1 : signE) + jitter(Math.abs(env.ve) * 0.08 + 1.2),
+      env.vn + jitter(Math.abs(env.vn) * 0.2 + 0.8),
+      env.vu + jitter(Math.abs(env.vu) * 0.08 + 1),
+    );
+  }
 
   const up = new Vec3(0, 0, 1);
   let bodyX = up;
@@ -239,11 +269,11 @@ export function spawnAt(energy: number, seed: number): Spawn {
     q,
     omega,
     fuel: env.fuel,
-    wind: env.wind,
+    wind: slam ? clamp(env.wind + jitter(0.35), 0.5, 1.35) : env.wind,
     timeout: env.timeout,
     energy: env.energy,
   };
 }
 
-export const SAVE_VERSION = 3;
-export const SAVE_KEY = "spacey-brain-v3";
+export const SAVE_VERSION = 7;
+export const SAVE_KEY = "spacey-brain-v7";

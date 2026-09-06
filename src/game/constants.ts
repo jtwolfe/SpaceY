@@ -8,6 +8,12 @@ export const GAMMA_AIR = 1.4;
 export const PAD_LAT_DEG = 28.4856;
 export const PAD_LON_DEG = -80.5444;
 
+/** LZ-1 concrete disk — 282 ft. Apron is extra packed soil around it. */
+export const LZ1_DIAMETER_M = 86;
+export const LZ1_APRON_M = 15.24;
+/** LZ-2 sits ~1,017 ft northwest of LZ-1. */
+export const LZ2_NORTHWEST_M = 310;
+
 export const STAGE_DIAMETER_M = 3.66;
 export const STAGE_LENGTH_M = 47.0;
 export const STAGE_RADIUS_M = STAGE_DIAMETER_M * 0.5;
@@ -42,6 +48,8 @@ export const FIN_CL_DELTA = 0.55;
 export const BODY_CP_X_M = -1.6;
 export const FIN_Q_FADE_PA = 4_000;
 export const FIN_Q_FULL_PA = 8_000;
+/** Unlit high-q divert window: score range killed above this, tax late leans below it. */
+export const COAST_ALT_M = 400;
 
 export const Q_DESTROY_PA = 110_000;
 export const G_DESTROY = 12;
@@ -54,12 +62,14 @@ export const RCS_ANG_ACCEL = 0.55;
 export const RCS_Q_HANDOFF_PA = 160_000;
 
 export const SUCCESS_ENGINE_ALT_M = 12;
-export const SUCCESS_SPEED_MPS = 8;
-export const SUCCESS_HVEL_MPS = 4;
-export const SUCCESS_PAD_OFFSET_M = 20;
-export const SUCCESS_TILT_RAD = (8 * Math.PI) / 180;
+export const SUCCESS_SPEED_MPS = 16;
+export const SUCCESS_HVEL_MPS = 8;
+export const SUCCESS_PAD_OFFSET_M = 35;
+export const SUCCESS_TILT_RAD = (16 * Math.PI) / 180;
 export const IMPACT_SPEED_MPS = 20;
 export const IMPACT_TILT_RAD = (20 * Math.PI) / 180;
+/** Engine-nozzle height at gear-on-deck. Landing burn stays lit above this. */
+export const GEAR_ENGINE_ALT_M = 8;
 
 export const DT = 0.02;
 export const POLICY_DT = 0.1;
