@@ -51,6 +51,12 @@ export const GROW_SIGMA = 0.16;
 export const GROW_NEED = 3;
 export const GROW_MIN_GENS = 5;
 export const GROW_PLATEAU_RATE = 0.25;
+/** RTLS basin is sparse; allow the 5→6 grow without waiting for pad-like 25%. */
+export const GROW_PLATEAU_RATE_RTLS = 0.06;
+/** Closest-approach (m) that still counts as a useful RTLS parent. Far misses do not. */
+export const RTLS_NEAR_M = 200;
+/** Once this many RTLS landers exist, drop misses so a lucky 20 km coast cannot yank the mean. */
+export const RTLS_LANDERS_ONLY = 8;
 
 export type Brain = {
   version: number;
@@ -69,7 +75,7 @@ export type Brain = {
 
 export function layersForEnergy(energy: number) {
   const e = snapEnergy(energy);
-  if (e >= 0.999) return N_HIDDEN_LAYERS_MAX;
+  if (e >= 0.999) return Math.min(5, N_HIDDEN_LAYERS_MAX);
   if (e >= 0.68) return Math.min(3, N_HIDDEN_LAYERS_MAX);
   if (e >= 0.22) return Math.min(2, N_HIDDEN_LAYERS_MAX);
   return N_HIDDEN_LAYERS_MIN;
@@ -79,6 +85,9 @@ function fitBrainLayers(b: Brain) {
   const want = layersForEnergy(b.energy);
   let L = layersFromLen(b.weights.length);
   if (!L) return;
+  // Glide used to cap at 4. A 4-layer RTLS brain is glide-tuned residual on an
+  // 80 km entry — damp toward GNC once while growing to the RTLS floor (5).
+  const dampGlideOnRtls = b.energy >= 0.85 && L < 5;
   while (L < want && L < N_HIDDEN_LAYERS_MAX) {
     const from = b.weights.length;
     b.weights = growWeights(b.weights);
@@ -86,6 +95,13 @@ function fitBrainLayers(b: Brain) {
     b.pc = growVec(b.pc, 0, from);
     b.diagC = growVec(b.diagC, 1, from);
     L = layersFromLen(b.weights.length) || L + 1;
+  }
+  if (dampGlideOnRtls) {
+    for (let i = 0; i < b.weights.length; i++) b.weights[i] *= 0.08;
+    b.ps.fill(0);
+    b.pc.fill(0);
+    b.diagC.fill(1);
+    b.sigma = clamp(Math.max(b.sigma, 0.12) * 1.1, SIGMA_MIN, 0.22);
   }
 }
 
@@ -283,7 +299,12 @@ export function scoreSim(sim: Sim): number {
   }
   const speed = n.speed;
   if (sim.term === "miss") {
-    return -8 * range - 6 * recede - 10 * speed - 0.4 * Math.max(0, n.engineAlt) - 40 * climb - lightTax - pose - track - WOBBLE_TAX * wobble + coast - late;
+    let miss =
+      -8 * range - 6 * recede - 10 * speed - 0.4 * Math.max(0, n.engineAlt) - 40 * climb - lightTax - pose - track - WOBBLE_TAX * wobble + coast - late;
+    if (sim.energy >= 0.85) {
+      miss += -8 * recede + 10 * Math.max(0, RTLS_NEAR_M - sim.minRange);
+    }
+    return miss;
   }
   if (sim.term === "destroyed") {
     return -7_000 - range * 0.4 - speed * 4 - 3 * recede - 15 * climb - lightTax - pose - track - 0.4 * WOBBLE_TAX * wobble + 0.5 * coast - 0.5 * late;
@@ -342,6 +363,24 @@ export type GymSnap = {
     hero: boolean;
   }[];
 };
+
+/** Pick CMA parents. Pad / 2 km / Glide: landers first, fill with next-best.
+ *  RTLS: a high-fit 20 km coast-kill must not sit in μ next to one lander. */
+export function selectParents(agents: Agent[], energy: number): Agent[] {
+  const ranked = [...agents].sort((a, b) => b.fit - a.fit);
+  const landers = ranked.filter((a) => a.landed);
+  const rest = ranked.filter((a) => !a.landed);
+  if (energy >= 0.85) {
+    if (landers.length >= RTLS_LANDERS_ONLY) return landers.slice(0, MU);
+    const near = rest.filter((a) => a.sim.minRange < RTLS_NEAR_M);
+    const pool = [...landers, ...near];
+    if (pool.length > 0) return pool.slice(0, Math.min(MU, pool.length));
+    const closest = [...rest].sort((a, b) => a.sim.minRange - b.sim.minRange);
+    return closest.slice(0, Math.min(8, closest.length));
+  }
+  const pool = landers.length >= MU ? landers : [...landers, ...rest];
+  return pool.slice(0, Math.min(MU, pool.length));
+}
 
 export class Trainer {
   brain: Brain;
@@ -515,7 +554,7 @@ export class Trainer {
     const n = a.sim.nav;
     const recede = Math.max(0, n.rangeH - a.sim.minRange);
     const extra = Math.max(0, a.sim.engine.lights - lightBudget(a.sim.energy));
-    return (
+    let s =
       -8 * n.rangeH -
       6 * recede -
       10 * n.speed -
@@ -527,8 +566,11 @@ export class Trainer {
       refTrackCost(a.sim.ref, a.sim.p, a.sim.v) -
       WOBBLE_TAX * a.sim.wobbleT +
       coastScore(a.sim) -
-      lateLeanTax(a.sim)
-    );
+      lateLeanTax(a.sim);
+    if (a.sim.energy >= 0.85) {
+      s += -8 * recede + 10 * Math.max(0, RTLS_NEAR_M - a.sim.minRange);
+    }
+    return s;
   }
 
   snap(view?: Sim): GymSnap {
@@ -691,7 +733,7 @@ export class Trainer {
       this.growStreak = 0;
       return;
     }
-    if (this.brain.landRate < GROW_PLATEAU_RATE) {
+    if (this.brain.landRate < (this.brain.energy >= 0.85 ? GROW_PLATEAU_RATE_RTLS : GROW_PLATEAU_RATE)) {
       this.growStreak = 0;
       return;
     }
@@ -704,13 +746,7 @@ export class Trainer {
   finishGen() {
     this.unlocked = null;
     this.grown = null;
-    const ranked = [...this.agents].sort((a, b) => b.fit - a.fit);
-    const landers = ranked.filter((a) => a.landed);
-    const rest = ranked.filter((a) => !a.landed);
-    // Landers first. Fill to μ with next-best so a 5% glide basin can learn from
-    // slow near-misses; pad/2 km with ≥μ landers stay landers-only.
-    const pool = landers.length >= MU ? landers : [...landers, ...rest];
-    const parents = pool.slice(0, Math.min(MU, pool.length));
+    const parents = selectParents(this.agents, this.brain.energy);
     if (parents.length) this.cmaUpdate(parents);
 
     this.brain.gen += 1;
@@ -736,8 +772,8 @@ export class Trainer {
     }
     if (unlocked) {
       this.growLayer();
-      // 2 km residual lofts a glide suicide. Start glide near GNC; do not
-      // shrink again when glide unlocks RTLS.
+      // 2 km residual lofts a glide suicide. Start glide near GNC. RTLS damp
+      // lives in fitBrainLayers so a 4/4 already-unlocked brain is damped too.
       if (this.unlocked === "glide") {
         for (let i = 0; i < this.brain.weights.length; i++) this.brain.weights[i] *= 0.08;
         this.brain.ps.fill(0);
@@ -749,3 +785,4 @@ export class Trainer {
     return parents[0];
   }
 }
+

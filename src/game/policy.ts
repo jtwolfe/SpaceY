@@ -10,13 +10,14 @@ import {
   THROTTLE_MAX,
   THROTTLE_MIN,
 } from "./constants";
-import type { Controls, Nav } from "./guidance";
+import type { Controls, Nav, Phase } from "./guidance";
 import { clamp, saturate, Vec3, Quat } from "./math";
 
 export const N_IN = 21;
 export const N_HIDDEN = 8;
 export const N_HIDDEN_LAYERS_MIN = 1;
-export const N_HIDDEN_LAYERS_MAX = 4;
+/** Glide plateaus at 3 and used to sit at 4/4 with no RTLS block left. */
+export const N_HIDDEN_LAYERS_MAX = 6;
 export const N_HIDDEN_LAYERS = N_HIDDEN_LAYERS_MAX;
 export const N_OUT = 10;
 
@@ -161,9 +162,20 @@ export function observe(nav: Nav, bodyY: Vec3, omega: Vec3, ref?: RefObs | null)
   ];
 }
 
+/** Glide-tuned residual at 80 km / 2 km/s fights entry GNC. Freeze until the
+ *  booster is in the same regime the earlier rungs trained on. */
+export function residualLive(energy: number, phase: Phase, alt: number, speed: number, entryOn: boolean) {
+  if (energy < 0.85) return true;
+  if (entryOn) return false;
+  if (phase === "exo" || phase === "entry") return false;
+  if (phase === "glide" && (alt > 12_000 || speed > 450)) return false;
+  return true;
+}
+
 /** Nudge GNC actuators. |y|=1 is a small, recoverable offset — not a takeover.
- *  Residual cannot relight a shut engine (0.22 of throttle would snap to Merlin min 40% and hover). */
-export function applyResidual(u: Controls, y: ArrayLike<number>) {
+ *  Residual cannot relight a shut engine (0.22 of throttle would snap to Merlin min 40% and hover).
+ *  lockEngines: RTLS landing keeps GNC's 1-Merlin (y[6] must not dump a 3-wide). */
+export function applyResidual(u: Controls, y: ArrayLike<number>, lockEngines = false) {
   const gncOff = u.nEngines <= 0 || u.throttle <= 0.02;
   u.gimbalY = clamp(u.gimbalY + y[1] * GIMBAL_MAX_RAD * 0.7 + y[7] * GIMBAL_MAX_RAD * 0.2, -GIMBAL_MAX_RAD, GIMBAL_MAX_RAD);
   u.gimbalZ = clamp(u.gimbalZ + y[2] * GIMBAL_MAX_RAD * 0.7 + y[8] * GIMBAL_MAX_RAD * 0.2, -GIMBAL_MAX_RAD, GIMBAL_MAX_RAD);
@@ -183,6 +195,7 @@ export function applyResidual(u: Controls, y: ArrayLike<number>) {
     u.nEngines = 0;
     return;
   }
+  if (lockEngines) return;
   if (y[6] > 0.42) u.nEngines = 3;
   else if (y[6] < -0.42 && u.nEngines > 0) u.nEngines = 1;
 }
@@ -201,4 +214,3 @@ export function keepSinking(u: Controls, nav: Nav) {
   u.throttle = 0;
   u.nEngines = 0;
 }
-

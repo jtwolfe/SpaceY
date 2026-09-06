@@ -10,12 +10,13 @@ import {
   layersFromLen,
   mlpForward,
   nWeights,
+  residualLive,
   topologyOf,
   zeroWeights,
 } from "./policy";
 import { goalFromState, planRef } from "./reftraj";
 import { Vec3 } from "./math";
-import { GATE_RATE, MU, POP, Trainer, defaultBrain, layersForEnergy, scoreSim } from "./trainer";
+import { GATE_RATE, MU, POP, Trainer, defaultBrain, layersForEnergy, scoreSim, selectParents, type Agent } from "./trainer";
 import { attitudeCommand, emptyControls, landingEngineCluster, makeNav, NOMINAL_GAINS, unpoweredLandingAim } from "./guidance";
 import { finQEnable } from "./vehicle";
 
@@ -70,6 +71,13 @@ function main() {
     [1, 1],
   ] as const;
   let fail = false;
+  const why: string[] = [];
+  const mark = (ok: boolean, msg: string) => {
+    if (!ok) {
+      fail = true;
+      why.push(msg);
+    }
+  };
   for (const [e, s] of cases) {
     const r = trial(e, s);
     console.log(JSON.stringify({ ...r, samples: r.samples.slice(0, 8) }));
@@ -93,7 +101,7 @@ function main() {
   const pad = spawnAt(0, 42);
   if (Math.hypot(pad.p.x, pad.p.y) > 25) fail = true;
   console.log(JSON.stringify({ slamRanges: ranges.map((n) => +n.toFixed(1)), spread: +spread.toFixed(1) }));
-  if (nWeights(1) !== 266 || nWeights(4) !== 482 || N_IN !== 21) fail = true;
+  if (nWeights(1) !== 266 || nWeights(4) !== 482 || nWeights(6) !== 626 || N_IN !== 21) fail = true;
   if (POP !== 64 || MU !== 32) fail = true;
   const z = mlpForward(zeroWeights(), Array.from({ length: N_IN }, () => 0));
   if (z.layers !== 1 || z.h.length !== N_HIDDEN || z.y.length !== N_OUT) fail = true;
@@ -267,7 +275,9 @@ function main() {
   if (yMean.some((v, i) => Math.abs(v - yGrown[i]) > 1e-9)) fail = true;
   tr.growLayer();
   tr.growLayer();
-  if (tr.brain.weights.length !== 482) fail = true;
+  tr.growLayer();
+  tr.growLayer();
+  if (tr.brain.weights.length !== 626) fail = true;
   if (tr.growLayer()) fail = true;
 
   const gate = new Trainer();
@@ -280,7 +290,7 @@ function main() {
   if (Math.abs(after2.energy - 0.22) > 1e-9) fail = true;
   if (after2.n !== 338) fail = true;
   if (!after2.grown) fail = true;
-  if (layersForEnergy(0) !== 1 || layersForEnergy(0.22) !== 2 || layersForEnergy(0.68) !== 3 || layersForEnergy(1) !== 4) fail = true;
+  if (layersForEnergy(0) !== 1 || layersForEnergy(0.22) !== 2 || layersForEnergy(0.68) !== 3 || layersForEnergy(1) !== 5) fail = true;
   const b2 = defaultBrain();
   b2.energy = 0.22;
   const fitted = new Trainer(b2);
@@ -289,11 +299,79 @@ function main() {
   const yFit1 = Array.from(mlpForward(fitted.brain.weights, x).y);
   if (yFit0.some((v, i) => Math.abs(v - yFit1[i]) > 1e-9)) fail = true;
 
+  const bRtls = defaultBrain();
+  bRtls.energy = 1;
+  const fittedRtls = new Trainer(bRtls);
+  mark(fittedRtls.brain.weights.length === 554, `rtlsFitLen ${fittedRtls.brain.weights.length}`);
+  mark(layersFromLen(fittedRtls.brain.weights.length) === 5, "rtlsFitLayers");
+
+  fakeGen(gate, gateLands);
+  fakeGen(gate, gateLands);
+  mark(Math.abs(gate.brain.energy - 0.68) <= 1e-9, `glideUnlock ${gate.brain.energy}`);
+  fakeGen(gate, gateLands);
+  fakeGen(gate, gateLands);
+  mark(Math.abs(gate.brain.energy - 1) <= 1e-9, `rtlsUnlock ${gate.brain.energy}`);
+  const afterRtls = new Trainer(gate.brain);
+  mark(afterRtls.brain.weights.length === 554, `afterRtls ${afterRtls.brain.weights.length}`);
+
+  function stubAgent(landed: boolean, fit: number, minRange: number): Agent {
+    return {
+      weights: [],
+      z: [],
+      sim: { minRange } as Agent["sim"],
+      fit,
+      term: landed ? "landed" : "miss",
+      landed,
+      trail: new Float32Array(0),
+      trailLen: 0,
+      trailCursor: 0,
+    };
+  }
+  const farMisses = Array.from({ length: 40 }, (_, i) => stubAgent(false, 8_000 - i, 20_000 + i * 10));
+  const oneLand = [stubAgent(true, 12_000, 2), ...farMisses];
+  const padPool = selectParents(oneLand, 0);
+  mark(padPool.length === MU, `padPool ${padPool.length}`);
+  mark(padPool.some((a) => !a.landed && a.sim.minRange > 1_000), "padPoolFar");
+  const rtlsPool = selectParents(oneLand, 1);
+  mark(rtlsPool.length === 1 && !!rtlsPool[0].landed, `rtlsPool ${rtlsPool.length} land=${rtlsPool[0]?.landed}`);
+  const noLand = farMisses.map((a, i) => stubAgent(false, 9_000 - i, i === 3 ? 80 : 18_000 + i));
+  const rtlsClose = selectParents(noLand, 1);
+  mark(rtlsClose.length === 1 && rtlsClose[0].sim.minRange === 80, `rtlsClose ${rtlsClose.length} r=${rtlsClose[0]?.sim.minRange}`);
+  const allFar = farMisses.map((a, i) => stubAgent(false, 9_000 - i, 15_000 + i * 100));
+  const rtlsFar = selectParents(allFar, 1);
+  mark(rtlsFar.length === 8, `rtlsFar ${rtlsFar.length}`);
+  mark(!rtlsFar.some((a, i) => i > 0 && a.sim.minRange < rtlsFar[i - 1].sim.minRange), "rtlsFarSort");
+  mark(rtlsFar[0].sim.minRange === Math.min(...allFar.map((a) => a.sim.minRange)), "rtlsFarMin");
+
+  mark(residualLive(0, "entry", 80_000, 2_000, true), "padLiveEntry");
+  mark(residualLive(0, "landing", 200, 20, false), "padLiveLand");
+  mark(!residualLive(1, "entry", 80_000, 2_000, true), "rtlsFreezeEntry");
+  mark(!residualLive(1, "glide", 40_000, 800, false), "rtlsFreezeHiGlide");
+  mark(residualLive(1, "landing", 400, 40, false), "rtlsLiveLand");
+  mark(residualLive(1, "glide", 8_000, 200, false), "rtlsLiveLoGlide");
+
+  const wild1 = zeroWeights(1).map(() => 2.5);
+  const wildR = zeroWeights(5).map(() => 2.5);
+  const padStu = Sim.start(0, 42, { destroy: false, pilot: "student", weights: wild1 });
+  const padApo = Sim.start(0, 42, { destroy: false, pilot: "autopilot" });
+  padStu.stepFor(7);
+  padApo.stepFor(7);
+  const padDiv = Math.abs(padStu.p.x - padApo.p.x) + Math.abs(padStu.p.z - padApo.p.z);
+  mark(padDiv >= 0.4, `padDiv ${padDiv.toFixed(3)}`);
+  const rtlsStu = Sim.start(1, 1, { destroy: false, pilot: "student", weights: wildR });
+  const rtlsApo = Sim.start(1, 1, { destroy: false, pilot: "autopilot" });
+  rtlsStu.stepFor(25);
+  rtlsApo.stepFor(25);
+  const rtlsDiv = Math.abs(rtlsStu.p.x - rtlsApo.p.x) + Math.abs(rtlsStu.p.z - rtlsApo.p.z);
+  mark(rtlsDiv <= 2, `rtlsDiv ${rtlsDiv.toFixed(3)} ph=${rtlsStu.phase}/${rtlsApo.phase} entry=${rtlsStu.entryBurn}/${rtlsApo.entryBurn}`);
+  mark(rtlsStu.entryBurn === rtlsApo.entryBurn, "rtlsEntryMatch");
+
   console.log(
     JSON.stringify({
       nWeights: nWeights(1),
       topology: topologyOf(1),
-      max: topologyOf(4),
+      max: topologyOf(N_HIDDEN_LAYERS_MAX),
+      rtlsLayers: layersForEnergy(1),
       sigma: +tr.brain.sigma.toFixed(3),
       mu: MU,
       unlockGrow: after2,
@@ -306,6 +384,7 @@ function main() {
       landTaxed: +landTaxed.toFixed(0),
       missFit: +missFit.toFixed(0),
       fail,
+      why,
     }),
   );
   if (fail) process.exit(1);

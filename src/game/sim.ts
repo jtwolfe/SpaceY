@@ -36,7 +36,7 @@ import {
   type TermReason,
   NOMINAL_GAINS,
 } from "./guidance";
-import { applyResidual, keepSinking, mlpForward, observe, N_HIDDEN, N_HIDDEN_LAYERS, N_OUT } from "./policy";
+import { applyResidual, keepSinking, mlpForward, observe, residualLive, N_HIDDEN, N_HIDDEN_LAYERS, N_OUT } from "./policy";
 import { Quat, slew, Vec3 } from "./math";
 import { spawnAt, missionFromEnergy, type Spawn } from "./scenario";
 import { ballisticMissRange, goalFromState, goalToRefObs, planRef, type GoalCmd, type RefTraj } from "./reftraj";
@@ -305,7 +305,9 @@ export class Sim {
         const o = mlpForward(this.weights, observe(this.nav, by, this.omega, this.refObs()));
         this.lastY = Array.from(o.y);
         this.lastHidden = Array.from(o.h);
-        applyResidual(u, o.y);
+        if (residualLive(this.energy, this.phase, this.nav.alt, this.nav.speed, this.entryBurn === "on")) {
+          applyResidual(u, o.y, this.energy >= 0.85);
+        }
         keepSinking(u, this.nav);
       }
       if (this.landingDone) {
