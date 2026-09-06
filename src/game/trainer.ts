@@ -8,6 +8,8 @@ export const ELITE = 3;
 export const TRAIL_MAX = 280;
 export const GATE_RATE = 0.4;
 export const GATE_NEED = 2;
+/** Points per metre of pad offset on a land. Was 8 — too flat vs the +12000 jackpot. */
+export const LAND_RANGE_TAX = 80;
 
 export type Brain = {
   version: number;
@@ -84,17 +86,17 @@ export type Agent = {
   trailCursor: number;
 };
 
-/** Honest score: a land always beats a miss. */
+/** Honest score: a land always beats a miss. Closer lands beat rim lands. */
 export function scoreSim(sim: Sim): number {
   const n = sim.nav;
   if (sim.term === "landed") {
-    return 12_000 + n.fuel * 0.08 - sim.t * 2 - n.speed * 40 - n.rangeH * 8;
+    return 12_000 + n.fuel * 0.08 - sim.t * 2 - n.speed * 40 - n.rangeH * LAND_RANGE_TAX;
   }
   const range = n.rangeH;
   const speed = n.speed;
   const tilt = (n.tilt * 180) / Math.PI;
   if (sim.term === "miss") {
-    return -range - 14 * speed - 18 * tilt - 0.4 * Math.max(0, n.engineAlt);
+    return -8 * range - 14 * speed - 18 * tilt - 0.4 * Math.max(0, n.engineAlt);
   }
   if (sim.term === "destroyed") {
     return -7_000 - range * 0.4 - speed * 4;
