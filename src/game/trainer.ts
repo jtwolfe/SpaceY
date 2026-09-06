@@ -84,22 +84,24 @@ export type Agent = {
   trailCursor: number;
 };
 
-/** Honest score: a land always beats a miss. */
+/** Honest score: a land always beats a miss. Misses that recede after closest approach lose to tight slams. */
 export function scoreSim(sim: Sim): number {
   const n = sim.nav;
-  if (sim.term === "landed") {
-    return 12_000 + n.fuel * 0.08 - sim.t * 2 - n.speed * 40 - n.rangeH * 8;
-  }
   const range = n.rangeH;
+  const recede = Math.max(0, range - sim.minRange);
+  const climb = sim.climbT;
+  if (sim.term === "landed") {
+    return 12_000 + n.fuel * 0.08 - sim.t * 2 - n.speed * 40 - range * 8;
+  }
   const speed = n.speed;
   const tilt = (n.tilt * 180) / Math.PI;
   if (sim.term === "miss") {
-    return -range - 14 * speed - 18 * tilt - 0.4 * Math.max(0, n.engineAlt);
+    return -8 * range - 6 * recede - 10 * speed - 12 * tilt - 0.4 * Math.max(0, n.engineAlt) - 40 * climb;
   }
   if (sim.term === "destroyed") {
-    return -7_000 - range * 0.4 - speed * 4;
+    return -7_000 - range * 0.4 - speed * 4 - 3 * recede - 15 * climb;
   }
-  return -5_000 - range * 0.3 - speed * 2 - n.engineAlt * 0.05;
+  return -5_000 - range * 0.3 - speed * 2 - n.engineAlt * 0.05 - 4 * recede - 20 * climb;
 }
 
 export type GymSnap = {
@@ -279,7 +281,15 @@ export class Trainer {
   private liveFit(a: Agent) {
     if (a.sim.terminated()) return a.fit;
     const n = a.sim.nav;
-    return -n.rangeH - 14 * n.speed - 18 * ((n.tilt * 180) / Math.PI) - 0.35 * Math.max(0, n.engineAlt);
+    const recede = Math.max(0, n.rangeH - a.sim.minRange);
+    return (
+      -8 * n.rangeH -
+      6 * recede -
+      10 * n.speed -
+      12 * ((n.tilt * 180) / Math.PI) -
+      0.35 * Math.max(0, n.engineAlt) -
+      40 * a.sim.climbT
+    );
   }
 
   snap(view?: Sim): GymSnap {

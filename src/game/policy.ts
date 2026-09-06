@@ -109,16 +109,38 @@ export function observe(nav: Nav, bodyY: Vec3, omega: Vec3): number[] {
   ];
 }
 
-/** Nudge GNC actuators. |y|=1 is a small, recoverable offset — not a takeover. */
+/** Nudge GNC actuators. |y|=1 is a small, recoverable offset — not a takeover.
+ *  Residual cannot relight a shut engine (0.22 of throttle would snap to Merlin min 40% and hover). */
 export function applyResidual(u: Controls, y: ArrayLike<number>) {
-  u.throttle = saturate(u.throttle + y[0] * 0.22);
-  if (u.throttle > 0.02 && u.throttle < THROTTLE_MIN) u.throttle = THROTTLE_MIN;
-  if (u.throttle > THROTTLE_MAX) u.throttle = THROTTLE_MAX;
+  const gncOff = u.nEngines <= 0 || u.throttle <= 0.02;
   u.gimbalY = clamp(u.gimbalY + y[1] * GIMBAL_MAX_RAD * 0.7 + y[7] * GIMBAL_MAX_RAD * 0.2, -GIMBAL_MAX_RAD, GIMBAL_MAX_RAD);
   u.gimbalZ = clamp(u.gimbalZ + y[2] * GIMBAL_MAX_RAD * 0.7 + y[8] * GIMBAL_MAX_RAD * 0.2, -GIMBAL_MAX_RAD, GIMBAL_MAX_RAD);
   u.finPitch = clamp(u.finPitch + y[3] * FIN_MAX_DEFLECT_RAD * 0.7, -FIN_MAX_DEFLECT_RAD, FIN_MAX_DEFLECT_RAD);
   u.finYaw = clamp(u.finYaw + y[4] * FIN_MAX_DEFLECT_RAD * 0.7, -FIN_MAX_DEFLECT_RAD, FIN_MAX_DEFLECT_RAD);
   u.finRoll = clamp(u.finRoll + y[5] * FIN_MAX_DEFLECT_RAD * 0.7 + y[9] * FIN_MAX_DEFLECT_RAD * 0.3, -FIN_MAX_DEFLECT_RAD, FIN_MAX_DEFLECT_RAD);
+  if (gncOff) {
+    u.throttle = 0;
+    u.nEngines = 0;
+    return;
+  }
+  u.throttle = saturate(u.throttle + y[0] * 0.22);
+  if (u.throttle > 0.02 && u.throttle < THROTTLE_MIN) u.throttle = THROTTLE_MIN;
+  if (u.throttle > THROTTLE_MAX) u.throttle = THROTTLE_MAX;
+  if (u.throttle <= 0.02) {
+    u.throttle = 0;
+    u.nEngines = 0;
+    return;
+  }
   if (y[6] > 0.42) u.nEngines = 3;
   else if (y[6] < -0.42 && u.nEngines > 0) u.nEngines = 1;
 }
+
+/** Re-apply after the net: a landing-envelope climb cannot keep thrusting. Suicide (vz < 0) is untouched. */
+export function keepSinking(u: Controls, nav: Nav) {
+  if (nav.engineAlt > 8_000) return;
+  if (u.nEngines <= 0 || u.throttle <= 0.02) return;
+  if (nav.v.z <= 0.8) return;
+  u.throttle = 0;
+  u.nEngines = 0;
+}
+

@@ -27,7 +27,7 @@ import {
   type TermReason,
   NOMINAL_GAINS,
 } from "./guidance";
-import { applyResidual, mlpForward, observe, N_HIDDEN, N_HIDDEN_LAYERS, N_OUT } from "./policy";
+import { applyResidual, keepSinking, mlpForward, observe, N_HIDDEN, N_HIDDEN_LAYERS, N_OUT } from "./policy";
 import { Quat, slew, Vec3 } from "./math";
 import { spawnAt, type Spawn } from "./scenario";
 import {
@@ -96,6 +96,8 @@ export class Sim {
     fire: false,
   };
   seed = 1;
+  minRange = 1e9;
+  climbT = 0;
 
   static fromSpawn(spawn: Spawn, opts?: { destroy?: boolean; pilot?: Pilot; gains?: Gains; seed?: number; weights?: number[] }) {
     const s = new Sim();
@@ -113,6 +115,8 @@ export class Sim {
     s.weights = opts?.weights ? [...opts.weights] : null;
     s.seed = opts?.seed ?? 1;
     s.windDir = (s.seed % 360) * (Math.PI / 180);
+    s.minRange = Math.hypot(s.p.x, s.p.y);
+    s.climbT = 0;
     s.refreshNav();
     return s;
   }
@@ -190,6 +194,7 @@ export class Sim {
         this.lastY = Array.from(o.y);
         this.lastHidden = [...Array.from(o.h1), ...Array.from(o.h2)];
         applyResidual(u, o.y);
+        keepSinking(u, this.nav);
       }
     }
 
@@ -259,6 +264,8 @@ export class Sim {
     this.t += dt;
 
     this.refreshNav();
+    this.minRange = Math.min(this.minRange, this.nav.rangeH);
+    if (this.nav.engineAlt < 3_000 && this.v.z > 0.8) this.climbT += dt;
 
     const dest = checkDestruction(this.lastQ, this.lastAoa, this.lastAccelG, this.omega.len(), this.destroyEnabled);
     if (dest !== "none") {
