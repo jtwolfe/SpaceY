@@ -1,11 +1,13 @@
 import { clamp, rng } from "./math";
-import { SAVE_KEY, SAVE_VERSION } from "./scenario";
+import { SAVE_KEY, SAVE_VERSION, missionFromEnergy, nextEnergy, snapEnergy, type Mission } from "./scenario";
 import { Sim } from "./sim";
 import { N_WEIGHTS, zeroWeights } from "./policy";
 
 export const POP = 12;
 export const ELITE = 3;
 export const TRAIL_MAX = 280;
+export const GATE_RATE = 0.4;
+export const GATE_NEED = 2;
 
 export type Brain = {
   version: number;
@@ -24,7 +26,7 @@ export function defaultBrain(): Brain {
     version: SAVE_VERSION,
     weights: zeroWeights(),
     sigma: 0.2,
-    energy: 0.22,
+    energy: 0,
     gen: 0,
     bestFit: -1e9,
     landRate: 0,
@@ -41,7 +43,13 @@ export function loadBrain(): Brain {
     if (parsed.version !== SAVE_VERSION || !Array.isArray(parsed.weights) || parsed.weights.length !== N_WEIGHTS) {
       return defaultBrain();
     }
-    return { ...defaultBrain(), ...parsed, weights: parsed.weights.map(Number), sigma: Math.max(0.12, Number(parsed.sigma) || 0.2) };
+    return {
+      ...defaultBrain(),
+      ...parsed,
+      weights: parsed.weights.map(Number),
+      sigma: Math.max(0.12, Number(parsed.sigma) || 0.2),
+      energy: snapEnergy(Number(parsed.energy) || 0),
+    };
   } catch {
     return defaultBrain();
   }
@@ -113,6 +121,10 @@ export type GymSnap = {
   watchGen: number;
   hidden: number[];
   outputs: number[];
+  stage: Mission;
+  gateStreak: number;
+  gateNeed: number;
+  gateRate: number;
   pop: {
     fit: number;
     term: string;
@@ -130,15 +142,16 @@ export class Trainer {
   seed0 = 1;
   genLands = 0;
   streak = 0;
-  dropStreak = 0;
   heroIdx = 0;
   doneCount = 0;
   watchCursor = 0;
   watchIdx = 0;
   watchGen = 0;
+  unlocked: Mission | null = null;
 
   constructor(brain?: Brain) {
     this.brain = brain ?? defaultBrain();
+    this.brain.energy = snapEnergy(this.brain.energy);
   }
 
   beginGen() {
@@ -147,11 +160,13 @@ export class Trainer {
     this.genLands = 0;
     this.doneCount = 0;
     this.heroIdx = 0;
-    const destroy = this.brain.energy > 0.3;
+    const energy = snapEnergy(this.brain.energy);
+    this.brain.energy = energy;
+    const destroy = energy > 0.3;
     for (let i = 0; i < POP; i++) {
       const weights = i === 0 ? [...this.brain.weights] : sampleWeights(this.brain.weights, this.brain.sigma, rand);
       const seed = this.seed0 + this.brain.gen * 1009 + i * 17 + 3;
-      const sim = Sim.start(this.brain.energy, seed, { destroy, pilot: "student", weights });
+      const sim = Sim.start(energy, seed, { destroy, pilot: "student", weights });
       this.agents.push({
         weights,
         sim,
@@ -163,6 +178,20 @@ export class Trainer {
         trailCursor: 0,
       });
     }
+  }
+
+  applyBrain(brain: Brain) {
+    this.brain = {
+      ...defaultBrain(),
+      ...brain,
+      weights: brain.weights?.length === N_WEIGHTS ? [...brain.weights] : zeroWeights(),
+      energy: snapEnergy(brain.energy ?? 0),
+      sigma: Math.max(0.12, brain.sigma || 0.2),
+    };
+    this.streak = 0;
+    this.watchCursor = 0;
+    this.unlocked = null;
+    this.beginGen();
   }
 
   stepAll(dt: number) {
@@ -296,6 +325,10 @@ export class Trainer {
       watchGen: this.watchGen,
       hidden: [...(vis.lastHidden ?? [])],
       outputs: [...(vis.lastY ?? [])],
+      stage: missionFromEnergy(this.brain.energy),
+      gateStreak: this.streak,
+      gateNeed: GATE_NEED,
+      gateRate: GATE_RATE,
       pop: this.agents.map((a, i) => ({
         fit: this.liveFit(a),
         term: a.sim.terminated() ? a.term : "fly",
@@ -309,6 +342,7 @@ export class Trainer {
   }
 
   finishGen() {
+    this.unlocked = null;
     const ranked = [...this.agents].sort((a, b) => b.fit - a.fit);
     const landers = ranked.filter((a) => a.landed);
     const elite = (landers.length ? landers : ranked).slice(0, ELITE);
@@ -332,25 +366,18 @@ export class Trainer {
     const rate = this.genLands / POP;
     this.brain.landRate = this.brain.landRate * 0.55 + rate * 0.45;
 
-    if (rate >= 0.4) {
+    if (rate >= GATE_RATE) {
       this.streak += 1;
-      this.dropStreak = 0;
-      if (this.streak >= 2 && this.brain.energy < 1) {
-        this.brain.energy = Math.min(1, this.brain.energy + 0.08);
+      const nxt = nextEnergy(this.brain.energy);
+      if (this.streak >= GATE_NEED && nxt != null) {
+        this.brain.energy = nxt;
         this.streak = 0;
-        this.brain.sigma = Math.max(this.brain.sigma, 0.12);
-      }
-    } else if (rate < 0.08) {
-      this.dropStreak += 1;
-      this.streak = 0;
-      if (this.dropStreak >= 4 && this.brain.energy > 0) {
-        this.brain.energy = Math.max(0, this.brain.energy - 0.06);
-        this.dropStreak = 0;
-        this.brain.sigma = Math.max(this.brain.sigma, 0.14);
+        this.brain.landRate = 0;
+        this.brain.sigma = Math.max(this.brain.sigma, 0.16);
+        this.unlocked = missionFromEnergy(nxt);
       }
     } else {
       this.streak = 0;
-      this.dropStreak = 0;
     }
     saveBrain(this.brain);
     return elite[0];

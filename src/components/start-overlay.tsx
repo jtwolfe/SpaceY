@@ -1,5 +1,6 @@
 import { Dna, Rocket } from "lucide-react";
 import { useSpacey } from "@/game/store";
+import { N_WEIGHTS, TOPOLOGY } from "@/game/policy";
 
 export function StartOverlay() {
   const started = useSpacey((s) => s.started);
@@ -11,9 +12,9 @@ export function StartOverlay() {
         <p className="font-mono text-xs tracking-[0.22em] text-muted">LZ-1 · BLOCK 5 CLASS · LIVE GYM</p>
         <h1 className="mt-2 text-3xl font-medium tracking-tight text-fg md:text-4xl">SpaceY</h1>
         <p className="mt-3 text-pretty text-sm leading-relaxed text-muted">
-          A 210-weight neural net is evolving in this tab. CMA-ES mutates twelve residual controllers at full
-          speed. The camera follows one rocket at 1×; when it fails, the next flight is taken from the live
-          generation.
+          A {N_WEIGHTS}-weight {TOPOLOGY} net is evolving in this tab. CMA-ES mutates twelve residual controllers at
+          full speed. Training is gated: Pad, then 2 km, Glide, then RTLS — each rung unlocks only after two strong
+          generations. The camera follows one rocket; Watch 1×–16× sets its speed.
         </p>
         <p className="mt-3 font-mono text-xs text-steel">Drag to look · scroll zoom · Chase / Pad / Orbit</p>
         <div className="mt-6 flex flex-col gap-2">

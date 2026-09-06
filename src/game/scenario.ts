@@ -128,6 +128,13 @@ export function envelopeAt(energy: number): Envelope {
 
 export type Mission = "pad" | "slam" | "glide" | "rtls";
 
+export const LADDER: { id: Mission; energy: number; label: string }[] = [
+  { id: "pad", energy: 0, label: "Pad" },
+  { id: "slam", energy: 0.22, label: "2 km" },
+  { id: "glide", energy: 0.68, label: "Glide" },
+  { id: "rtls", energy: 1, label: "RTLS" },
+];
+
 export function energyForMission(m: Mission): number {
   switch (m) {
     case "pad":
@@ -141,12 +148,45 @@ export function energyForMission(m: Mission): number {
   }
 }
 
+/** Snap continuous energy onto the nearest named training rung. */
+export function snapEnergy(energy: number): number {
+  const e = Math.min(1, Math.max(0, energy));
+  let best = LADDER[0].energy;
+  let bestD = Infinity;
+  for (const r of LADDER) {
+    const d = Math.abs(r.energy - e);
+    if (d < bestD) {
+      bestD = d;
+      best = r.energy;
+    }
+  }
+  return best;
+}
+
+export function missionFromEnergy(energy: number): Mission {
+  const e = snapEnergy(energy);
+  let m: Mission = "pad";
+  for (const r of LADDER) if (e + 1e-9 >= r.energy) m = r.id;
+  return m;
+}
+
+export function nextEnergy(energy: number): number | null {
+  const e = snapEnergy(energy);
+  for (const r of LADDER) if (r.energy > e + 1e-9) return r.energy;
+  return null;
+}
+
 export function missionLabel(energy: number) {
-  if (energy < 0.12) return "Pad slam";
-  if (energy < 0.32) return "2 km";
-  if (energy < 0.55) return "6DOF + wind";
-  if (energy < 0.85) return "Glide";
-  return "RTLS";
+  switch (missionFromEnergy(energy)) {
+    case "pad":
+      return "Pad slam";
+    case "slam":
+      return "2 km";
+    case "glide":
+      return "Glide";
+    case "rtls":
+      return "RTLS";
+  }
 }
 
 export type Spawn = {
@@ -205,5 +245,5 @@ export function spawnAt(energy: number, seed: number): Spawn {
   };
 }
 
-export const SAVE_VERSION = 2;
-export const SAVE_KEY = "spacey-brain-v2";
+export const SAVE_VERSION = 3;
+export const SAVE_KEY = "spacey-brain-v3";

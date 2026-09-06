@@ -26,6 +26,7 @@ export function GameApp() {
         getStarted: () => useSpacey.getState().started,
         getSeed: () => useSpacey.getState().seed,
         getBrain: () => useSpacey.getState().brain,
+        getBrainEpoch: () => useSpacey.getState().brainEpoch,
         onSnap: (snap) => useSpacey.getState().setSnap(snap),
         onBrain: (b) => useSpacey.getState().setBrain(b),
         onGym: (g) => useSpacey.getState().setGym(g),

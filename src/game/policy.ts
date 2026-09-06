@@ -1,4 +1,4 @@
-/** 14→8→10 tanh residual net. Zero weights leave the GNC untouched. */
+/** 14→8→8→10 tanh residual net. Zero weights leave the GNC untouched. */
 
 import {
   FIN_MAX_DEFLECT_RAD,
@@ -13,8 +13,16 @@ import { clamp, saturate, Vec3, Quat } from "./math";
 
 export const N_IN = 14;
 export const N_HIDDEN = 8;
+export const N_HIDDEN_LAYERS = 2;
 export const N_OUT = 10;
-export const N_WEIGHTS = N_HIDDEN * N_IN + N_HIDDEN + N_OUT * N_HIDDEN + N_OUT; // 210
+export const N_WEIGHTS =
+  N_HIDDEN * N_IN +
+  N_HIDDEN +
+  N_HIDDEN * N_HIDDEN +
+  N_HIDDEN +
+  N_OUT * N_HIDDEN +
+  N_OUT; // 282
+export const TOPOLOGY = `${N_IN}→${N_HIDDEN}→${N_HIDDEN}→${N_OUT}`;
 
 const OBS_POS = 400;
 const OBS_VEL = 80;
@@ -35,32 +43,42 @@ function asinh(x: number) {
   return Math.asinh(x);
 }
 
-export type MlpOut = { y: Float64Array; h: Float64Array };
+export type MlpOut = { y: Float64Array; h1: Float64Array; h2: Float64Array };
 
 const Y = new Float64Array(N_OUT);
-const H = new Float64Array(N_HIDDEN);
+const H1 = new Float64Array(N_HIDDEN);
+const H2 = new Float64Array(N_HIDDEN);
 
 export function mlpForward(w: number[], x: ArrayLike<number>): MlpOut {
   const need = N_WEIGHTS;
   Y.fill(0);
-  H.fill(0);
-  if (w.length < need) return { y: Y, h: H };
+  H1.fill(0);
+  H2.fill(0);
+  if (w.length < need) return { y: Y, h1: H1, h2: H2 };
   const b1 = N_HIDDEN * N_IN;
   const w2 = b1 + N_HIDDEN;
-  const b2 = w2 + N_OUT * N_HIDDEN;
+  const b2 = w2 + N_HIDDEN * N_HIDDEN;
+  const w3 = b2 + N_HIDDEN;
+  const b3 = w3 + N_OUT * N_HIDDEN;
   for (let j = 0; j < N_HIDDEN; j++) {
     let s = w[b1 + j];
     const row = j * N_IN;
     for (let i = 0; i < N_IN; i++) s += w[row + i] * x[i];
-    H[j] = tanh(s);
+    H1[j] = tanh(s);
+  }
+  for (let j = 0; j < N_HIDDEN; j++) {
+    let s = w[b2 + j];
+    const row = w2 + j * N_HIDDEN;
+    for (let i = 0; i < N_HIDDEN; i++) s += w[row + i] * H1[i];
+    H2[j] = tanh(s);
   }
   for (let a = 0; a < N_OUT; a++) {
-    let s = w[b2 + a];
-    const row = w2 + a * N_HIDDEN;
-    for (let j = 0; j < N_HIDDEN; j++) s += w[row + j] * H[j];
+    let s = w[b3 + a];
+    const row = w3 + a * N_HIDDEN;
+    for (let j = 0; j < N_HIDDEN; j++) s += w[row + j] * H2[j];
     Y[a] = tanh(s);
   }
-  return { y: Y, h: H };
+  return { y: Y, h1: H1, h2: H2 };
 }
 
 export function observe(nav: Nav, bodyY: Vec3, omega: Vec3): number[] {

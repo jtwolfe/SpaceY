@@ -27,7 +27,7 @@ import {
   type TermReason,
   NOMINAL_GAINS,
 } from "./guidance";
-import { applyResidual, mlpForward, observe, N_HIDDEN, N_OUT } from "./policy";
+import { applyResidual, mlpForward, observe, N_HIDDEN, N_HIDDEN_LAYERS, N_OUT } from "./policy";
 import { Quat, slew, Vec3 } from "./math";
 import { spawnAt, type Spawn } from "./scenario";
 import {
@@ -86,7 +86,7 @@ export class Sim {
   held = emptyControls();
   weights: number[] | null = null;
   lastY: number[] = Array.from({ length: N_OUT }, () => 0);
-  lastHidden: number[] = Array.from({ length: N_HIDDEN }, () => 0);
+  lastHidden: number[] = Array.from({ length: N_HIDDEN * N_HIDDEN_LAYERS }, () => 0);
   manual: ManualCmd = {
     pitch: 0,
     yaw: 0,
@@ -188,7 +188,7 @@ export class Sim {
       if (this.weights && this.weights.length) {
         const o = mlpForward(this.weights, observe(this.nav, by, this.omega));
         this.lastY = Array.from(o.y);
-        this.lastHidden = Array.from(o.h);
+        this.lastHidden = [...Array.from(o.h1), ...Array.from(o.h2)];
         applyResidual(u, o.y);
       }
     }

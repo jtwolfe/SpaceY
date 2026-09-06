@@ -12,7 +12,7 @@ export const Route = createRootRoute({
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: APP_NAME },
       { name: "theme-color", content: "#07080c" },
-      { name: "description", content: "Watch CMA-ES evolve a 210-weight net that lands a Falcon 9-class booster, trained live in the browser." },
+      { name: "description", content: "Watch CMA-ES evolve a residual net that lands a Falcon 9-class booster, trained live in the browser." },
     ],
     links: [
       { rel: "icon", type: "image/svg+xml", href: "/favicon.svg" },

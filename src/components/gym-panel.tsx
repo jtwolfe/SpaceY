@@ -1,7 +1,7 @@
-import { N_HIDDEN, N_IN, N_OUT, N_WEIGHTS } from "@/game/policy";
-import { POP } from "@/game/trainer";
+import { N_HIDDEN, N_OUT, N_WEIGHTS, TOPOLOGY } from "@/game/policy";
+import { GATE_NEED, GATE_RATE, POP } from "@/game/trainer";
 import { useSpacey } from "@/game/store";
-import { missionLabel } from "@/game/scenario";
+import { LADDER, missionLabel } from "@/game/scenario";
 
 function barTone(term: string, landed: boolean, hero: boolean) {
   if (landed) return "bg-ok";
@@ -14,20 +14,27 @@ export function GymPanel() {
   const gym = useSpacey((s) => s.gym);
   const pilot = useSpacey((s) => s.pilot);
   const genNote = useSpacey((s) => s.genNote);
+  const warp = useSpacey((s) => s.warp);
   if (pilot !== "train") return null;
-  const hidden = gym?.hidden ?? Array.from({ length: N_HIDDEN }, () => 0);
+  const hidden = gym?.hidden ?? Array.from({ length: N_HIDDEN * 2 }, () => 0);
+  const h1 = hidden.slice(0, N_HIDDEN);
+  const h2 = hidden.slice(N_HIDDEN, N_HIDDEN * 2);
   const outputs = gym?.outputs ?? Array.from({ length: N_OUT }, () => 0);
   const pop = gym?.pop ?? [];
   const outLabels = ["thr", "gimY", "gimZ", "finP", "finY", "finR", "n", "rcsY", "rcsZ", "finR2"];
   const nLive = gym?.nLive ?? pop.filter((p) => p.alive).length;
   const nLand = gym?.nLand ?? 0;
   const nDead = gym?.nDead ?? 0;
+  const stage = gym?.stage ?? "pad";
+  const stageIdx = Math.max(0, LADDER.findIndex((r) => r.id === stage));
+  const gateStreak = gym?.gateStreak ?? 0;
+  const atTop = stageIdx >= LADDER.length - 1;
   return (
     <div className="pointer-events-none absolute right-0 top-0 z-10 flex w-[min(17rem,calc(100%-0.75rem))] flex-col gap-2 p-3 pt-[max(0.75rem,env(safe-area-inset-top))] md:w-80 md:p-4">
       <div className="rounded-lg bg-bg-elevated/85 px-4 py-3 ring-1 ring-border backdrop-blur-sm">
         <p className="font-mono text-xs tracking-widest text-muted">CMA-ES · IN THIS TAB</p>
         <p className="mt-1 font-mono text-sm text-steel">
-          {N_IN}→{N_HIDDEN}→{N_OUT} tanh · {N_WEIGHTS} weights · λ {POP}
+          {TOPOLOGY} tanh · {N_WEIGHTS} weights · λ {POP}
         </p>
         <p className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 font-mono text-xs tabular-nums text-fg">
           <span>GEN {gym?.gen ?? 0}</span>
@@ -40,9 +47,24 @@ export function GymPanel() {
         <p className="mt-2 font-mono text-[11px] tabular-nums text-steel">
           {nLive} flying · {nLand} landed · {nDead} out · gym t+{(gym?.simT ?? 0).toFixed(1)}s
         </p>
+        <p className="mt-2 font-mono text-[11px] text-steel">
+          {atTop
+            ? "RTLS unlocked · holding the top rung"
+            : `Gate ${gateStreak}/${GATE_NEED} gens at ≥${Math.round(GATE_RATE * 100)}% land → ${LADDER[stageIdx + 1]?.label}`}
+        </p>
+        <div className="mt-2 flex gap-1">
+          {LADDER.map((r, i) => (
+            <div
+              key={r.id}
+              className={`h-1.5 flex-1 rounded-sm ${
+                i < stageIdx ? "bg-ok/80" : i === stageIdx ? "bg-steel" : "bg-border"
+              }`}
+            />
+          ))}
+        </div>
         <p className="mt-2 hidden font-mono text-[11px] leading-relaxed text-muted md:block">
-          Gym trains at full speed. Camera follows one genome at 1×; after a miss it respawns from the live
-          generation. Ringed bar = the rocket you are watching.
+          Gym trains at full speed. Camera follows one genome at {warp}×; after a miss it respawns from the live
+          generation. Stages only move forward.
         </p>
         {genNote ? <p className="mt-2 font-mono text-[11px] text-ok">{genNote}</p> : null}
       </div>
@@ -62,19 +84,13 @@ export function GymPanel() {
             );
           })}
         </div>
-        <p className="mt-2 font-mono text-[10px] text-muted">green land · steel flying · red miss · ring = 1× watch</p>
+        <p className="mt-2 font-mono text-[10px] text-muted">green land · steel flying · red miss · ring = watch rocket</p>
       </div>
       <div className="hidden rounded-lg bg-bg-elevated/85 px-4 py-3 ring-1 ring-border backdrop-blur-sm md:block">
-        <p className="font-mono text-xs tracking-widest text-muted">WATCH HIDDEN tanh</p>
-        <div className="mt-2 flex items-end gap-1" style={{ height: 36 }}>
-          {hidden.map((v, i) => (
-            <div
-              key={i}
-              className="flex-1 rounded-sm bg-steel/80"
-              style={{ height: `${Math.max(10, Math.abs(v) * 100)}%`, opacity: 0.3 + Math.abs(v) * 0.7 }}
-            />
-          ))}
-        </div>
+        <p className="font-mono text-xs tracking-widest text-muted">WATCH H1 tanh</p>
+        <HiddenRow values={h1.length ? h1 : Array.from({ length: N_HIDDEN }, () => 0)} />
+        <p className="mt-3 font-mono text-xs tracking-widest text-muted">WATCH H2 tanh</p>
+        <HiddenRow values={h2.length ? h2 : Array.from({ length: N_HIDDEN }, () => 0)} />
         <p className="mt-3 font-mono text-xs tracking-widest text-muted">
           WATCH RESIDUAL · |y| {(gym?.meanAbsY ?? 0).toFixed(2)}
         </p>
@@ -92,6 +108,20 @@ export function GymPanel() {
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+function HiddenRow({ values }: { values: number[] }) {
+  return (
+    <div className="mt-2 flex items-end gap-1" style={{ height: 36 }}>
+      {values.map((v, i) => (
+        <div
+          key={i}
+          className="flex-1 rounded-sm bg-steel/80"
+          style={{ height: `${Math.max(10, Math.abs(v) * 100)}%`, opacity: 0.3 + Math.abs(v) * 0.7 }}
+        />
+      ))}
     </div>
   );
 }

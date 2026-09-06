@@ -2,11 +2,10 @@ import { DT } from "./constants";
 import { createInput, readActions } from "./input";
 import { snapshot, Sim, type Pilot } from "./sim";
 import { SpaceyScene } from "./scene";
-import { Trainer, defaultBrain, type Brain, type GymSnap } from "./trainer";
+import { Trainer, type Brain, type GymSnap } from "./trainer";
 import type { Mission } from "./scenario";
-import { energyForMission } from "./scenario";
+import { energyForMission, missionLabel, snapEnergy } from "./scenario";
 import type { AppPilot, CamMode, HudSnap } from "./store";
-import { N_WEIGHTS } from "./policy";
 
 export type RuntimeHooks = {
   getPilot: () => AppPilot;
@@ -17,6 +16,7 @@ export type RuntimeHooks = {
   getStarted: () => boolean;
   getSeed: () => number;
   getBrain: () => Brain;
+  getBrainEpoch: () => number;
   onSnap: (s: HudSnap) => void;
   onBrain: (b: Brain) => void;
   onGym: (g: GymSnap) => void;
@@ -27,15 +27,8 @@ export function createRuntime(canvas: HTMLCanvasElement, hooks: RuntimeHooks) {
   const scene = new SpaceyScene(canvas);
   const input = createInput();
   const qaKeys = new Set<string>();
-  const loaded = hooks.getBrain();
-  const trainer = new Trainer({
-    ...defaultBrain(),
-    ...loaded,
-    sigma: Math.max(0.12, loaded.sigma || 0.2),
-    weights: loaded.weights?.length === N_WEIGHTS ? [...loaded.weights] : defaultBrain().weights,
-  });
-  trainer.brain.energy = energyForMission(hooks.getMission());
-  trainer.beginGen();
+  const trainer = new Trainer();
+  trainer.applyBrain(hooks.getBrain());
 
   let sim = bootSolo();
   let watchHold = 0;
@@ -47,10 +40,12 @@ export function createRuntime(canvas: HTMLCanvasElement, hooks: RuntimeHooks) {
   let lastMission = hooks.getMission();
   let lastPilot = hooks.getPilot();
   let lastSeed = hooks.getSeed();
+  let lastEpoch = hooks.getBrainEpoch();
   let uiT = 0;
+  let appliedWarp = 1;
 
   function energyNow() {
-    if (hooks.getPilot() === "train") return trainer.brain.energy;
+    if (hooks.getPilot() === "train") return snapEnergy(trainer.brain.energy);
     return energyForMission(hooks.getMission());
   }
 
@@ -80,10 +75,14 @@ export function createRuntime(canvas: HTMLCanvasElement, hooks: RuntimeHooks) {
     if (handoff) scene.beginHandoff();
   }
 
+  function applyNetReset() {
+    trainer.applyBrain(hooks.getBrain());
+    recycleWatch(false);
+    scene.resetLook();
+  }
+
   function restart() {
     if (hooks.getPilot() === "train") {
-      trainer.brain.energy = energyForMission(hooks.getMission());
-      trainer.beginGen();
       recycleWatch(false);
       scene.resetLook();
     } else {
@@ -123,8 +122,12 @@ export function createRuntime(canvas: HTMLCanvasElement, hooks: RuntimeHooks) {
       gen: trainer.watchGen,
       idx: trainer.watchIdx,
       speed: watch.v.len(),
+      energy: watch.energy,
+      warp: hooks.getWarp(),
+      appliedWarp,
     }),
     recycleWatch: () => recycleWatch(true),
+    resetNet: () => applyNetReset(),
   };
   const w = window as unknown as { __controlsTest?: typeof probe; __spacey?: typeof probe };
   w.__controlsTest = probe;
@@ -151,32 +154,51 @@ export function createRuntime(canvas: HTMLCanvasElement, hooks: RuntimeHooks) {
     return hooks.getPaused() || !hooks.getStarted();
   }
 
-  function stepWatch(dt: number) {
+  function stepWatch(wallDt: number) {
     if (watch.terminated()) {
-      watchHold += dt;
+      watchHold += wallDt;
       if (watchHold > 1.2) recycleWatch(true);
       return;
     }
-    watchAcc += Math.min(0.25, dt);
-    while (watchAcc >= DT && !watch.terminated()) {
+    const warp = Math.max(1, hooks.getWarp());
+    appliedWarp = warp;
+    watchAcc += Math.max(0, wallDt) * warp;
+    let n = 0;
+    const maxSteps = 240;
+    while (watchAcc >= DT && !watch.terminated() && n < maxSteps) {
       watch.step(DT);
       watchAcc -= DT;
+      n += 1;
     }
-    if (watchAcc > DT * 4) watchAcc = 0;
+    if (watchAcc > 4) watchAcc = 4;
   }
 
   function tickBody(dt: number, rawDt = dt) {
     const mission = hooks.getMission();
     const pilot = hooks.getPilot();
     const seed = hooks.getSeed();
+    const epoch = hooks.getBrainEpoch();
     const train = pilot === "train";
 
-    if (mission !== lastMission || pilot !== lastPilot) {
+    if (epoch !== lastEpoch) {
+      lastEpoch = epoch;
+      lastSeed = seed;
       lastMission = mission;
       lastPilot = pilot;
+      applyNetReset();
+    } else if (pilot !== lastPilot) {
+      lastPilot = pilot;
+      lastMission = mission;
       lastSeed = seed;
-      if (train) trainer.brain.energy = energyForMission(mission);
       restart();
+    } else if (!train && mission !== lastMission) {
+      lastMission = mission;
+      lastSeed = seed;
+      sim = bootSolo();
+      scene.resetTrail();
+      scene.resetLook();
+    } else if (train && mission !== lastMission) {
+      lastMission = mission;
     } else if (seed !== lastSeed) {
       lastSeed = seed;
       if (train) recycleWatch(true);
@@ -196,12 +218,18 @@ export function createRuntime(canvas: HTMLCanvasElement, hooks: RuntimeHooks) {
         trainer.stepAll(DT);
         n += 1;
         if (trainer.allDone()) {
+          const prevE = trainer.brain.energy;
           const elite = trainer.finishGen();
+          const unlocked = trainer.unlocked;
+          const stage = missionLabel(trainer.brain.energy);
           hooks.onNote(
-            `Gen ${trainer.brain.gen} · land ${(trainer.brain.landRate * 100).toFixed(0)}% · σ ${trainer.brain.sigma.toFixed(2)} · ${elite?.term ?? ""}`,
+            unlocked
+              ? `Unlocked ${missionLabel(trainer.brain.energy)} · gen ${trainer.brain.gen}`
+              : `Gen ${trainer.brain.gen} · ${stage} · land ${(trainer.brain.landRate * 100).toFixed(0)}% · σ ${trainer.brain.sigma.toFixed(2)} · ${elite?.term ?? ""}`,
           );
           hooks.onBrain(trainer.brain);
           trainer.beginGen();
+          if (trainer.brain.energy !== prevE) recycleWatch(true);
         }
       }
     } else if (!train && !soloPaused()) {
@@ -239,7 +267,7 @@ export function createRuntime(canvas: HTMLCanvasElement, hooks: RuntimeHooks) {
         nEngines: s.nEngines,
         g: s.g,
         intact: s.intact,
-        energy: s.energy,
+        energy: train ? trainer.brain.energy : s.energy,
         watch: train,
         watchGen: trainer.watchGen,
         watchIdx: trainer.watchIdx,

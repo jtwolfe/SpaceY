@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { TermReason } from "./guidance";
-import { energyForMission, type Mission } from "./scenario";
+import { missionFromEnergy, type Mission } from "./scenario";
 import { defaultBrain, loadBrain, saveBrain, type Brain, type GymSnap } from "./trainer";
 
 export type CamMode = "chase" | "pad" | "orbit";
@@ -36,6 +36,7 @@ type State = {
   warp: number;
   paused: boolean;
   brain: Brain;
+  brainEpoch: number;
   snap: HudSnap | null;
   gym: GymSnap | null;
   genNote: string;
@@ -63,14 +64,17 @@ function initialBrain(): Brain {
   }
 }
 
+const bootBrain = initialBrain();
+
 export const useSpacey = create<State>((set, get) => ({
   started: false,
   pilot: "train",
-  mission: "slam",
+  mission: missionFromEnergy(bootBrain.energy),
   cam: "chase",
-  warp: 4,
+  warp: 1,
   paused: false,
-  brain: initialBrain(),
+  brain: bootBrain,
+  brainEpoch: 0,
   snap: null,
   gym: null,
   genNote: "",
@@ -78,7 +82,12 @@ export const useSpacey = create<State>((set, get) => ({
   start: (pilot) => {
     const p = pilot ?? get().pilot;
     if (p === "train") {
-      set({ started: true, paused: false, pilot: p, mission: "slam", warp: Math.max(4, get().warp) });
+      set({
+        started: true,
+        paused: false,
+        pilot: p,
+        mission: missionFromEnergy(get().brain.energy),
+      });
     } else if (p === "autopilot") {
       set({ started: true, paused: false, pilot: p, mission: "pad", warp: 1 });
     } else {
@@ -87,13 +96,8 @@ export const useSpacey = create<State>((set, get) => ({
   },
   setPilot: (pilot) => set({ pilot, started: true, paused: false }),
   setMission: (mission) => {
-    const next: Partial<State> = { mission, started: true, paused: false, seed: get().seed + 1 };
-    if (get().pilot === "train") {
-      const brain = { ...get().brain, energy: energyForMission(mission) };
-      saveBrain(brain);
-      next.brain = brain;
-    }
-    set(next);
+    if (get().pilot === "train") return;
+    set({ mission, started: true, paused: false, seed: get().seed + 1 });
   },
   setCam: (cam) => set({ cam }),
   cycleWarp: () => set({ warp: get().warp >= 16 ? 1 : get().warp * 4 }),
@@ -102,13 +106,22 @@ export const useSpacey = create<State>((set, get) => ({
   setGym: (gym) => set({ gym }),
   setBrain: (brain) => {
     saveBrain(brain);
-    set({ brain });
+    const next: Partial<State> = { brain };
+    if (get().pilot === "train") next.mission = missionFromEnergy(brain.energy);
+    set(next);
   },
   setGenNote: (genNote) => set({ genNote }),
   resetBrain: () => {
     const brain = defaultBrain();
     saveBrain(brain);
-    set({ brain, gym: null, genNote: "Net reset to zeros. GNC only.", seed: get().seed + 1 });
+    set({
+      brain,
+      gym: null,
+      genNote: "Net reset to zeros. Gate starts at Pad.",
+      seed: get().seed + 1,
+      brainEpoch: get().brainEpoch + 1,
+      mission: "pad",
+    });
   },
   bumpSeed: () => set({ seed: get().seed + 1, started: true, paused: false }),
 }));

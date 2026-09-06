@@ -10,6 +10,7 @@ export function Hud() {
   const snap = useSpacey((s) => s.snap);
   const brain = useSpacey((s) => s.brain);
   const pilot = useSpacey((s) => s.pilot);
+  const warp = useSpacey((s) => s.warp);
   const genNote = useSpacey((s) => s.genNote);
   if (!snap) return null;
   const phase = snap.phase.toUpperCase();
@@ -21,7 +22,7 @@ export function Hud() {
       <div className="rounded-lg bg-bg-elevated/80 px-4 py-3 ring-1 ring-border backdrop-blur-sm">
         <p className="font-mono text-xs tracking-widest text-muted">
           SPACEY · {missionLabel(snap.energy)}
-          {snap.watch ? ` · WATCH 1×  GEN ${snap.watchGen ?? 0} #${snap.watchIdx ?? 0}` : ""}
+          {snap.watch ? ` · WATCH ${warp}×  GEN ${snap.watchGen ?? 0} #${snap.watchIdx ?? 0}` : ""}
         </p>
         <p
           className={`mt-1 font-mono text-lg font-medium tabular-nums ${ok ? "text-ok" : bad ? "text-bad" : "text-steel"}`}
