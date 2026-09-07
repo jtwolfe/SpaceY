@@ -83,8 +83,7 @@ export function classifyPhase(nav: Nav, landingLatched: boolean, energy = 0): Ph
     if (rtlsSuicideWindow(nav)) return "landing";
     if (nav.alt > 78_000 && nav.q < 80 && nav.speed < 400) return "exo";
     if (nav.speed > 900 && nav.alt > 35_000) return "entry";
-    if (nav.alt > 2_600) return "glide";
-    return "landing";
+    return "glide";
   }
   if (landingLatched) return "landing";
   if (shouldStartLanding(nav)) return "landing";
@@ -114,16 +113,16 @@ function hotUnpoweredCoast(nav: Nav) {
 export function rtlsSuicideWindow(nav: Nav) {
   const pz = nav.engineAlt;
   const vDown = Math.max(0, -nav.v.z);
-  // Deck must light. A 1.6 km force-light with small vDown is a 40% Merlin hover
-  // (min throttle still climbs an empty booster) that burns out 1 km over the disk.
-  if (pz < 280) return true;
-  if (pz < 1_600 && vDown > 22) return true;
+  // Deck must light. Do not force-light at 1.6 km: moderate vDown there still
+  // has enough suicide margin to reverse, and Merlin min 40% climbs an empty
+  // booster until dry ~1 km over the disk.
+  if (pz < 120) return true;
   const sl = suicideLightAlt(nav);
   if (sl.use3 && pz > 2_200) return false;
   const aEng = clamp(MERLIN_THRUST_SL_N / nav.mass - G0, 4, 40);
   const aDrag = (nav.q * REF_AREA_M2 * 0.4) / Math.max(1, nav.mass);
   const s1 = Math.max(0, vDown * vDown - 36) / (2 * (aEng + aDrag)) + 10;
-  return pz < s1 * 1.08 && pz < 4_200;
+  return pz < s1 * 1.04 && pz < 3_200;
 }
 
 export function vRef(alt: number) {

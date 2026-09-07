@@ -269,10 +269,13 @@ export class Sim {
     this.refreshNav();
     this.refreshGoal();
     if (!this.landingLatched && this.nav.rangeH < 8_000) {
-      const vDown = Math.max(0, -this.nav.v.z);
-      if (this.nav.engineAlt < 2_400 && vDown > 8) this.landingLatched = true;
-      if (this.nav.engineAlt < 400) this.landingLatched = true;
-      if (this.energy >= 0.85 && rtlsSuicideWindow(this.nav)) this.landingLatched = true;
+      if (this.energy >= 0.85) {
+        if (rtlsSuicideWindow(this.nav)) this.landingLatched = true;
+      } else {
+        const vDown = Math.max(0, -this.nav.v.z);
+        if (this.nav.engineAlt < 2_400 && vDown > 8) this.landingLatched = true;
+        if (this.nav.engineAlt < 400) this.landingLatched = true;
+      }
     }
     this.phase = classifyPhase(this.nav, this.landingLatched, this.energy);
     if (this.phase === "landing" && this.entryBurn === "on") this.entryBurn = "done";
