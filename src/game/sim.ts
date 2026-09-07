@@ -295,7 +295,11 @@ export class Sim {
       this.entryBurn = latch.entry;
       u = nom.u;
       desiredX = nom.desiredX;
-      const att = attitudeCommand(bx, by, bz, this.omega, desiredX, this.phase, this.lastQ, this.gains);
+      // RTLS 3-Merlin outlives classifyPhase "entry" (speed drops under 900). Glide
+      // wmax/gimbal in vacuum then pitches through zenith and tumbles at cutoff.
+      const attPhase =
+        this.energy >= 0.85 && this.entryBurn === "on" ? "entry" : this.phase;
+      const att = attitudeCommand(bx, by, bz, this.omega, desiredX, attPhase, this.lastQ, this.gains);
       u.gimbalY = att.gimY;
       u.gimbalZ = att.gimZ;
       u.finPitch = att.finP;

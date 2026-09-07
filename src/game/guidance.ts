@@ -291,8 +291,10 @@ function rtlsEntryCommand(nav: Nav): { want: boolean; still: boolean; thr: numbe
   const qHot = nav.q > 28_000 && nav.speed > 500;
   const long = extra > 3_500;
   const high = nav.alt > 38_000 && nav.alt < 95_000;
-  const want = fuelOk && high && (hypersonic || qHot || long);
-  const still = fuelOk && high && (hypersonic || qHot || extra > 2_000);
+  // 3-wide through a loft (vz→0) pitches the stack past retro and somersaults.
+  const falling = nav.v.z < -70;
+  const want = fuelOk && high && falling && (hypersonic || qHot || long);
+  const still = fuelOk && high && falling && (hypersonic || qHot || extra > 2_000);
   let thr = 1;
   if (!hypersonic && extra < 14_000) thr = clamp(0.55 + extra / 22_000, 0.55, 1);
   if (qHot && nav.q > 60_000) thr = 1;
