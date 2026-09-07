@@ -16,8 +16,9 @@ import { clamp, saturate, Vec3, Quat } from "./math";
 export const N_IN = 21;
 export const N_HIDDEN = 8;
 export const N_HIDDEN_LAYERS_MIN = 1;
-/** Glide plateaus at 3 and used to sit at 4/4 with no RTLS block left. */
-export const N_HIDDEN_LAYERS_MAX = 6;
+/** Glide plateaus at 3. RTLS is allowed to run long — extra identity
+ *  blocks only help final-pad accuracy (forward-unchanged at zero). */
+export const N_HIDDEN_LAYERS_MAX = 10;
 export const N_HIDDEN_LAYERS = N_HIDDEN_LAYERS_MAX;
 export const N_OUT = 10;
 

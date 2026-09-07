@@ -75,7 +75,7 @@ export type Brain = {
 
 export function layersForEnergy(energy: number) {
   const e = snapEnergy(energy);
-  if (e >= 0.999) return Math.min(5, N_HIDDEN_LAYERS_MAX);
+  if (e >= 0.999) return Math.min(8, N_HIDDEN_LAYERS_MAX);
   if (e >= 0.68) return Math.min(3, N_HIDDEN_LAYERS_MAX);
   if (e >= 0.22) return Math.min(2, N_HIDDEN_LAYERS_MAX);
   return N_HIDDEN_LAYERS_MIN;

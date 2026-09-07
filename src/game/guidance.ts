@@ -114,7 +114,10 @@ function hotUnpoweredCoast(nav: Nav) {
 export function rtlsSuicideWindow(nav: Nav) {
   const pz = nav.engineAlt;
   const vDown = Math.max(0, -nav.v.z);
-  if (pz < 1_600) return true;
+  // Deck must light. A 1.6 km force-light with small vDown is a 40% Merlin hover
+  // (min throttle still climbs an empty booster) that burns out 1 km over the disk.
+  if (pz < 280) return true;
+  if (pz < 1_600 && vDown > 22) return true;
   const sl = suicideLightAlt(nav);
   if (sl.use3 && pz > 2_200) return false;
   const aEng = clamp(MERLIN_THRUST_SL_N / nav.mass - G0, 4, 40);
@@ -276,7 +279,9 @@ function predictedImpactRtls(nav: Nav): { x: number; y: number; t: number } {
 
 /** RTLS-only: 3-Merlin entry until drag-aware intercept is near the pad. */
 function rtlsEntryCommand(nav: Nav): { want: boolean; still: boolean; thr: number } {
-  const reserve = SUICIDE_FUEL_KG * 0.95;
+  // 0.95×suicide left hot seeds hanging 20 km past the disk — they hit reserve
+  // with extra still > 2 km. Hero cuts on extra, not reserve, so this is free.
+  const reserve = SUICIDE_FUEL_KG * 0.72;
   const fuelOk = nav.fuel > reserve;
   const imp = predictedImpactRtls(nav);
   const predRange = Math.hypot(imp.x, imp.y);
@@ -285,7 +290,7 @@ function rtlsEntryCommand(nav: Nav): { want: boolean; still: boolean; thr: numbe
   const hypersonic = nav.speed > 1_450;
   const qHot = nav.q > 28_000 && nav.speed > 500;
   const long = extra > 3_500;
-  const high = nav.alt > 45_000 && nav.alt < 95_000;
+  const high = nav.alt > 38_000 && nav.alt < 95_000;
   const want = fuelOk && high && (hypersonic || qHot || long);
   const still = fuelOk && high && (hypersonic || qHot || extra > 2_000);
   let thr = 1;

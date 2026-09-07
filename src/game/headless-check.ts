@@ -101,7 +101,7 @@ function main() {
   const pad = spawnAt(0, 42);
   if (Math.hypot(pad.p.x, pad.p.y) > 25) fail = true;
   console.log(JSON.stringify({ slamRanges: ranges.map((n) => +n.toFixed(1)), spread: +spread.toFixed(1) }));
-  if (nWeights(1) !== 266 || nWeights(4) !== 482 || nWeights(6) !== 626 || N_IN !== 21) fail = true;
+  if (nWeights(1) !== 266 || nWeights(4) !== 482 || nWeights(10) !== 914 || N_IN !== 21) fail = true;
   if (POP !== 64 || MU !== 32) fail = true;
   const z = mlpForward(zeroWeights(), Array.from({ length: N_IN }, () => 0));
   if (z.layers !== 1 || z.h.length !== N_HIDDEN || z.y.length !== N_OUT) fail = true;
@@ -273,11 +273,8 @@ function main() {
   if (tr.brain.ps.length !== 338 || tr.brain.pc.length !== 338 || tr.brain.diagC.length !== 338) fail = true;
   const yGrown = Array.from(mlpForward(tr.brain.weights, x).y);
   if (yMean.some((v, i) => Math.abs(v - yGrown[i]) > 1e-9)) fail = true;
-  tr.growLayer();
-  tr.growLayer();
-  tr.growLayer();
-  tr.growLayer();
-  if (tr.brain.weights.length !== 626) fail = true;
+  while (tr.growLayer()) {}
+  if (tr.brain.weights.length !== nWeights(N_HIDDEN_LAYERS_MAX)) fail = true;
   if (tr.growLayer()) fail = true;
 
   const gate = new Trainer();
@@ -290,7 +287,7 @@ function main() {
   if (Math.abs(after2.energy - 0.22) > 1e-9) fail = true;
   if (after2.n !== 338) fail = true;
   if (!after2.grown) fail = true;
-  if (layersForEnergy(0) !== 1 || layersForEnergy(0.22) !== 2 || layersForEnergy(0.68) !== 3 || layersForEnergy(1) !== 5) fail = true;
+  if (layersForEnergy(0) !== 1 || layersForEnergy(0.22) !== 2 || layersForEnergy(0.68) !== 3 || layersForEnergy(1) !== 8) fail = true;
   const b2 = defaultBrain();
   b2.energy = 0.22;
   const fitted = new Trainer(b2);
@@ -302,8 +299,8 @@ function main() {
   const bRtls = defaultBrain();
   bRtls.energy = 1;
   const fittedRtls = new Trainer(bRtls);
-  mark(fittedRtls.brain.weights.length === 554, `rtlsFitLen ${fittedRtls.brain.weights.length}`);
-  mark(layersFromLen(fittedRtls.brain.weights.length) === 5, "rtlsFitLayers");
+  mark(fittedRtls.brain.weights.length === 770, `rtlsFitLen ${fittedRtls.brain.weights.length}`);
+  mark(layersFromLen(fittedRtls.brain.weights.length) === 8, "rtlsFitLayers");
 
   fakeGen(gate, gateLands);
   fakeGen(gate, gateLands);
@@ -312,7 +309,7 @@ function main() {
   fakeGen(gate, gateLands);
   mark(Math.abs(gate.brain.energy - 1) <= 1e-9, `rtlsUnlock ${gate.brain.energy}`);
   const afterRtls = new Trainer(gate.brain);
-  mark(afterRtls.brain.weights.length === 554, `afterRtls ${afterRtls.brain.weights.length}`);
+  mark(afterRtls.brain.weights.length === 770, `afterRtls ${afterRtls.brain.weights.length}`);
 
   function stubAgent(landed: boolean, fit: number, minRange: number): Agent {
     return {
