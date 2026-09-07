@@ -427,6 +427,13 @@ export function unpoweredGlideAim(nav: Nav, gains: Gains = NOMINAL_GAINS, rtls =
   } else {
     aoaCmd = clamp(0.2 + Math.abs(energy) * 0.25, 0.12, aoaMax);
   }
+  if (rtls) {
+    // Vacuum AoA is a flip, not drag. At 3-Merlin cutoff the command used to snap
+    // 66° toward zenith, leftover TVC rate became a somersault, and body lift
+    // sprayed half the population off the corridor. Hold tail-first until q
+    // can actually bleed energy; full AoA by ~7 kPa.
+    aoaCmd *= saturate((q - 80) / 7_000);
+  }
 
   const pitchDir = up.sub(retro.scale(retro.dot(up)));
   if (pitchDir.len() < 0.06) return retro.lerp(up, 0.2).normalized();
@@ -678,6 +685,7 @@ export function attitudeCommand(
   const errBody = new Vec3(err.dot(bodyX), err.dot(bodyY), err.dot(bodyZ));
   let wmax = 0.12;
   if (phase === "landing" && qDyn < 12_000) wmax = 0.35;
+  else if (phase === "glide" && qDyn < 400) wmax = 0.14;
   else if (phase === "glide" && qDyn < 110_000) wmax = 0.42;
   else if (phase === "landing" && qDyn < 40_000) wmax = 0.28;
   wmax *= g(gains, 6);
