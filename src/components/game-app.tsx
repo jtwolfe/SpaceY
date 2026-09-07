@@ -43,8 +43,8 @@ export function GameApp() {
   return (
     <div className="relative h-[100dvh] min-h-[100dvh] overflow-hidden bg-bg text-fg" style={{ touchAction: "none" }}>
       <canvas ref={canvasRef} className="block h-full w-full" />
-      <Hud />
-      <GymPanel />
+      {started ? <Hud /> : null}
+      {started ? <GymPanel /> : null}
       {started ? <Dock /> : null}
       <TouchPad />
       <StartOverlay />

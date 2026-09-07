@@ -3,6 +3,7 @@ import type { TermReason } from "./guidance";
 import { missionFromEnergy, type Mission } from "./scenario";
 import { defaultBrain, loadBrain, saveBrain, type Brain, type GymSnap } from "./trainer";
 
+export const WARP_STEPS = [1, 2, 4, 8, 16] as const;
 export type CamMode = "chase" | "pad" | "orbit";
 export type AppPilot = "autopilot" | "manual" | "train";
 
@@ -108,7 +109,12 @@ export const useSpacey = create<State>((set, get) => ({
     set({ mission, started: true, paused: false, seed: get().seed + 1 });
   },
   setCam: (cam) => set({ cam }),
-  cycleWarp: () => set({ warp: get().warp >= 16 ? 1 : get().warp * 4 }),
+  cycleWarp: () => {
+    const w = get().warp;
+    const i = WARP_STEPS.indexOf(w as (typeof WARP_STEPS)[number]);
+    const next = WARP_STEPS[i >= 0 && i < WARP_STEPS.length - 1 ? i + 1 : 0];
+    set({ warp: next });
+  },
   setPaused: (paused) => set({ paused }),
   setSnap: (snap) => set({ snap }),
   setGym: (gym) => set({ gym }),

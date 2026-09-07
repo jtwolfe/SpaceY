@@ -152,7 +152,7 @@ export function createRuntime(canvas: HTMLCanvasElement, hooks: RuntimeHooks) {
   }
 
   function trainPaused() {
-    return hooks.getPaused();
+    return hooks.getPaused() || !hooks.getStarted();
   }
 
   function soloPaused() {
