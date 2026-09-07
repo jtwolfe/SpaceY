@@ -1,4 +1,4 @@
-import { CircleDot, Dna, Rocket } from "lucide-react";
+import { Dna } from "lucide-react";
 import { useSpacey } from "@/game/store";
 import { N_HIDDEN_LAYERS_MAX, N_WEIGHTS, TOPOLOGY, nWeights } from "@/game/policy";
 import { MU, POP } from "@/game/trainer";
@@ -26,32 +26,14 @@ export function StartOverlay() {
           light and taxes extra lights, engine-on time, and thrusting away while still short.
         </p>
         <p className="mt-3 font-mono text-xs text-steel">Drag to look · scroll zoom · Chase / Pad / Orbit · 1–16×</p>
-        <div className="mt-6 flex flex-col gap-2">
-          <button
-            type="button"
-            onClick={() => start("train")}
-            className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md bg-steel px-4 font-medium text-bg transition-transform duration-150 hover:opacity-90 active:scale-[0.98]"
-          >
-            <Dna className="size-4" />
-            Start training
-          </button>
-          <button
-            type="button"
-            onClick={() => start("autopilot", "slam")}
-            className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md bg-bg-subtle px-4 font-medium text-steel ring-1 ring-border transition-transform duration-150 hover:bg-bg active:scale-[0.98]"
-          >
-            <CircleDot className="size-4" />
-            Watch a 2 km hop
-          </button>
-          <button
-            type="button"
-            onClick={() => start("autopilot")}
-            className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md bg-bg-subtle px-4 font-medium text-steel ring-1 ring-border transition-transform duration-150 hover:bg-bg active:scale-[0.98]"
-          >
-            <Rocket className="size-4" />
-            Watch a GNC pad landing
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={() => start("train")}
+          className="mt-6 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md bg-steel px-4 font-medium text-bg transition-transform duration-150 hover:opacity-90 active:scale-[0.98]"
+        >
+          <Dna className="size-4" />
+          Start training
+        </button>
       </div>
     </div>
   );
