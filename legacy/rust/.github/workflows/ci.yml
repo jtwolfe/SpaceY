@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  sim:
+    name: spacey_sim (test + wasm32)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Native tests
+        run: cargo test -p spacey_sim
+
+      - name: wasm32 build (fail closed)
+        run: cargo build -p spacey_sim --target wasm32-unknown-unknown --release
+
+      - name: wasm-bindgen CLI
+        run: cargo install wasm-bindgen-cli --version 0.2.100 --locked
+
+      - name: wasm32 pad gym (zero policy does not land)
+        run: |
+          wasm-bindgen --target nodejs --out-dir target/wasm-gym-check --out-name spacey \
+            target/wasm32-unknown-unknown/release/spacey_sim.wasm
+          node scripts/wasm_gym_check.mjs 1

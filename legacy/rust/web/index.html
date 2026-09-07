@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SpaceY — RTLS</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect fill='%2305070c' width='64' height='64'/%3E%3Ctext x='8' y='42' fill='%237ee0ff' font-size='22' font-family='monospace'%3ESY%3C/text%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="view"></canvas>
+
+      <header class="topbar">
+        <div class="brand">
+          <span class="mark">SY</span>
+          <div>
+            <div class="title">SPACEY</div>
+            <div class="sub" id="mission-sub">FALCON 9-CLASS · RTLS · CMA-NEUROES</div>
+          </div>
+        </div>
+        <div class="status" id="mission-status">STANDBY</div>
+      </header>
+
+      <aside class="hud left">
+        <h2>VEHICLE</h2>
+        <dl id="veh-hud"></dl>
+        <h2>AERO</h2>
+        <dl id="aero-hud"></dl>
+        <h2>NAV</h2>
+        <canvas id="nav-map" width="240" height="164"></canvas>
+        <p class="nav-hint">drag to orbit · wheel dolly · dbl-click / 0 reset · arrows</p>
+      </aside>
+
+      <aside class="hud right">
+        <h2>TRAINING</h2>
+        <div class="train-meta" id="train-meta">RTLS · train 1/6 pad slam</div>
+        <div class="phase-dots" id="phase-dots" aria-label="training stages"></div>
+        <canvas id="fit-spark" width="236" height="42"></canvas>
+        <canvas id="fit-hist" width="236" height="56"></canvas>
+        <p class="nav-hint" id="train-legend">true land = ≤8 m/s on the pad · 8–20 m/s sit-down is a miss, not a RUD · 2D until 6DOF</p>
+        <h2>GUIDANCE</h2>
+        <dl id="guid-hud"></dl>
+      </aside>
+
+      <footer class="dock">
+        <div class="cluster">
+          <button id="btn-train" class="primary">Start training</button>
+          <button id="btn-pause">Pause</button>
+          <button id="btn-reset">Reset episode</button>
+        </div>
+        <div class="cluster">
+          <label class="check">
+            <input type="checkbox" id="tog-autopilot" />
+            Autopilot demo
+          </label>
+          <label class="check">
+            <input type="checkbox" id="tog-destroy" checked />
+            Destruction
+          </label>
+          <label class="check">
+            <input type="checkbox" id="tog-storm" />
+            Storm
+          </label>
+          <label class="check">
+            <input type="checkbox" id="tog-shear" />
+            Shear
+          </label>
+          <label class="slider">
+            Wind
+            <input type="range" id="rng-wind" min="0" max="2" step="0.1" value="1" />
+            <span id="wind-val">1.0×</span>
+          </label>
+        </div>
+        <div class="cluster">
+          <span class="lbl">Camera</span>
+          <button data-cam="chase" class="cam" title="Third-person on the booster, looking toward the LZ">Chase</button>
+          <button data-cam="pad" class="cam on" title="Frame the landing zone, start, and booster">Pad</button>
+          <button data-cam="orbit" class="cam" title="Earth view of the whole recovery">Orbital</button>
+        </div>
+        <div class="cluster">
+          <span class="lbl">Warp</span>
+          <button data-warp="1" class="warp on">1×</button>
+          <button data-warp="5" class="warp">5×</button>
+          <button data-warp="25" class="warp">25×</button>
+          <button data-warp="100" class="warp">100×</button>
+          <button data-warp="250" class="warp">250×</button>
+        </div>
+      </footer>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

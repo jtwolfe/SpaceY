@@ -1,14 +1,49 @@
-# SpaceY — in-tab CMA gym
+# SpaceY
 
-TypeScript rewrite of the Falcon 9–class RTLS trainer. A residual net starts at 21→8→10 (266 weights). Hansen sep-CMA-ES (λ=64, μ=32, log-weighted recombination, CSA σ, diagonal C) trains it in the tab. A hidden residual block is spliced in — function-preserving at zero — when a rung unlocks, or when σ has collapsed on a plateau, up to 21→8→8→8→8→10 (482 w). The gym trains at full speed; the camera follows one rocket at watch speed (1× / 4× / 16×). After a miss, the next watch flight is sampled from the live generation.
+A **local, in-browser CMA-ES gym** for a Falcon 9–class first stage **return to landing site**.
 
-Training is a gated ladder: **Pad → 2 km → Glide → RTLS**. Two consecutive generations at ≥40% land unlock the next rung. No auto-drop. Residual nets cannot relight a shut engine; misses that loft or recede after closest approach lose to a tight slam. Each rung has a Merlin light budget (Pad/2 km/glide: 1, RTLS: 2); extras are taxed. GNC latches entry and landing to that budget. Pad and 2 km wait for suicide altitude instead of lighting on spawn; lighting well above that curve is taxed. 2 km starts in a 200 m circle around the pad, inbound, so a tip-in-place over the bullseye is not enough. Unpowered landing GNC stays near-vertical with engines toward the pad so grid fins and body lift can kill miss; Merlin lights only at suicide altitude. After light, TVC aims leftover miss at the predicted ground intercept — it does not snap invert at ignition, and a skid brake kills leftover horizontal speed over the disk. On 2 km, a spawn-time 3DOF suicide-divert is kept only as a miss-scoring corridor. The residual instead tracks a receding-horizon **goal** recomputed from each vehicle’s current p, v, and fuel at 10 Hz: time-to-light, remaining Δv, predicted ballistic miss, and go-vertical inside the 35 m disk. After Merlin lights, that command is low-passed so the net does not chase a twitching clock. Body-rate wobble is taxed. A legal land still pays a quadratic pad-offset tax (×5 r²), so a rim touchdown loses thousands to a mark hit. The land disk is the inner grey ring (35 m), at up to 16 m/s and 16° tilt. Fitness pays pad range and ballistic miss killed while still unlit above 400 m, taxes leftover range×horizontal speed at light, engine-on time, three-engine seconds (extra at Merlin min — three at 40% is more thrust than one at 100%), and thrusting away while still short of the disk (no nose-at-pad bonus — that pose is engines away), plus tilt and |vh| weighted by 1/alt in the last 400 m — a quiet early divert beats a last-second TVC hook that still lands. Landing suicide is one Merlin; three-wide is only a short high-throttle pulse when one engine at 100% cannot stop, never an idle at the 40% floor. Once the landing burn is lit it stays lit to gear height (~8 m nozzle); a loft drops to 1 @ 40% instead of dumping the cluster. GNC grid-fin commands fade with q (zero below 4 kPa, full at 8 kPa) instead of a hard cut, so the 2 km coast can actually use the fins; after the landing burn, q dies on its own. Glide starts ~20 km up, 11 km east, inbound and a bit steeper so belly-flop drag can bleed energy before a 2 km-style suicide; unpowered GNC holds a q-limited high AoA, then hands off to the same landing loop. Coast scores scale with spawn range so an 11 km unpowered pass cannot eat the land jackpot. When glide unlocks, the 2 km residual is shrunk toward GNC (it otherwise lofts the long suicide); parents stay landers-only once a generation has ≥32 landings, otherwise near-misses fill μ.
+The plant, the GNC, and the trainer all run in this tab. Nothing is uploaded. A population of boosters trains at full speed; the camera follows one genome at 1–16×. Hit **Start training** and sep-CMA-ES walks a residual net through Pad → 2 km → Glide → full RTLS.
 
-Every rung shares a WGS84 Earth (6,378 km) textured with Blue Marble, Florida/Cape overlays, and atmosphere, plus a circular **LZ-1** (86 m pad, SpaceX X, apron, floodlights, LZ-2 310 m NW, Atlantic ~450 m east).
+This whole repo is an experiment in **ML and browser-side training**: can a small evolutionary strategy, running entirely on the client, climb a real-shaped landing ladder. The live app is TypeScript. Earlier Rust/WASM trainers are frozen under [`legacy/`](legacy/) for reference — old, often broken, not wired into the app.
 
-This branch is the Grok in-browser gym (not the Rust/WASM tree on `main` / `rework/full-rtls`).
+## Run
 
-```
+```bash
 npm install
 npm run dev
 ```
+
+The briefing overlay explains the gym. Training does not start until you click **Start training**. Weights and CMA state live in `localStorage`, so a reload keeps the session.
+
+| Command | What |
+|---------|------|
+| `npm run typecheck` | `tsc --noEmit` |
+| `npx jiti src/game/headless-check.ts` | Headless GNC / trainer sanity |
+
+## How it works
+
+**Ladder.** Four gated rungs: pad hover-slam, 2 km hop, unpowered grid-fin glide, then RTLS from ~80 km. Two consecutive generations at ≥40% land unlock the next rung. No auto-drop.
+
+**Plant + GNC.** TypeScript 6DOF on a WGS84 Earth, LZ-1 / LZ-2 at the Cape. Hand-written guidance flies entry, tail-first glide, and a 1-Merlin suicide. Three-wide is only a short pulse when one engine cannot stop.
+
+**Residual net.** Starts at `21→8→10` (266 weights) and grows identity hidden blocks as rungs unlock or σ plateaus, up to 10 layers. Zero weights mean “GNC only.” The net nudges gimbal, fins, throttle, and cluster from a receding-horizon goal (when to light, remaining divert, when to stand up). It cannot relight a shut engine.
+
+**Trainer.** Hansen sep-CMA-ES in the tab: λ = 64, μ = 32, diagonal covariance, CSA step-size. The gym steps as fast as the browser will go; watch speed is only the camera rocket. Score pays a land jackpot and ballistic miss killed before light, and taxes extra lights, engine-on time, three-wide, and thrusting away while still short of the pad.
+
+More detail: [docs/how-it-works.md](docs/how-it-works.md).
+
+## Layout
+
+| Path | What |
+|------|------|
+| [`src/game/`](src/game/) | Physics, GNC, residual policy, CMA trainer, three.js scene |
+| [`src/components/`](src/components/) | Start overlay, HUD, gym panel, dock |
+| [`legacy/`](legacy/) | Frozen earlier experiments. See [docs/legacy.md](docs/legacy.md) |
+
+After start, the dock still has Autopilot / Manual if you want a look-only hop. That is not the training loop.
+
+## Legacy
+
+[`legacy/rust`](legacy/rust) is the previous gym: Rust 6DOF compiled to WASM, a different CMA-NeuroES loop, and a separate Three.js front end. It is **kept as a record of the experiment**, not as a second product. Do not expect it to build, to match current land rates, or to share a save format with the TypeScript trainer.
+
+The old default-branch tip is still in git (`bcab81b`) and on branches such as `rework/full-rtls`.
